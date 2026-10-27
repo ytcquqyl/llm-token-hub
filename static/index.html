@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111827">
+<title>LLM Token 中枢</title>
+<style>
+  :root{
+    --bg:#0f172a; --card:#1e293b; --card2:#273449; --text:#e5e7eb; --muted:#94a3b8;
+    --primary:#3b82f6; --ok:#22c55e; --warn:#f59e0b; --err:#ef4444; --line:#334155;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;}
+  header{position:sticky;top:0;z-index:10;background:var(--bg);padding:14px 16px 8px;
+         border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}
+  header h1{font-size:17px;margin:0;flex:1}
+  .btn{background:var(--primary);color:#fff;border:0;border-radius:8px;padding:8px 12px;font-size:14px}
+  .btn.ghost{background:transparent;border:1px solid var(--line);color:var(--text)}
+  .btn.sm{padding:6px 10px;font-size:13px}
+  .btn.danger{background:var(--err)}
+  main{padding:12px 16px 90px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:12px}
+  .row{display:flex;align-items:center;gap:8px}
+  .title{font-size:15px;font-weight:600}
+  .sub{font-size:12px;color:var(--muted);margin-top:2px}
+  .badge{font-size:11px;padding:2px 7px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+  .amount{font-size:22px;font-weight:700}
+  .amount.na{font-size:14px;font-weight:500;color:var(--muted)}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+  .dot.ok{background:var(--ok)} .dot.err{background:var(--err)} .dot.warn{background:var(--warn)}
+  .kv{display:flex;gap:14px;margin-top:8px;font-size:12px;color:var(--muted)}
+  .actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+  .toolbar{display:flex;gap:8px;margin-bottom:12px}
+  #login{max-width:360px;margin:22vh auto;padding:20px}
+  input,select{width:100%;background:var(--card2);border:1px solid var(--line);color:var(--text);
+       border-radius:8px;padding:10px 12px;font-size:15px;margin-top:8px}
+  label{font-size:13px;color:var(--muted)}
+  .overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:flex-end;z-index:20}
+  .sheet{background:var(--card);border-top-left-radius:16px;border-top-right-radius:16px;
+         padding:16px;padding-bottom:32px;width:100%;max-height:88vh;overflow:auto}
+  .sheet h3{margin:0 0 6px;font-size:16px}
+  .close{position:absolute;right:14px;top:10px}
+  .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:24px;background:#111827;
+         border:1px solid var(--line);padding:10px 16px;border-radius:999px;font-size:13px;display:none;z-index:50}
+  .empty{text-align:center;color:var(--muted);font-size:14px;padding:36px 0}
+  code{background:var(--card2);padding:1px 5px;border-radius:4px;font-size:12px}
+</style>
+</head>
+<body>
+
+<header id="appHeader" style="display:none">
+  <h1>LLM Token 中枢</h1>
+  <button class="btn sm ghost" onclick="loadAll()">刷新</button>
+  <button class="btn sm" onclick="openAdd()">+ 添加</button>
+  <button class="btn sm ghost" onclick="logout()">退出</button>
+</header>
+
+<main id="app" style="display:none">
+  <div class="toolbar">
+    <button class="btn ghost" style="flex:1" onclick="refreshAll()">一键刷新全部额度</button>
+  </div>
+  <div id="list"><div class="empty">加载中…</div></div>
+</main>
+
+<div id="login" class="card">
+  <h3 style="margin:0 0 10px">登录</h3>
+  <label>访问密码（ADMIN_PASSWORD）</label>
+  <input id="pwd" type="password" placeholder="请输入访问密码" onkeydown="if(event.key==='Enter')login()">
+  <button class="btn" style="width:100%;margin-top:12px" onclick="login()">进入</button>
+  <p class="sub" style="margin-top:12px">数据仅保存在你自己的服务器本地，不会上传任何第三方。</p>
+</div>
+
+<div class="overlay" id="sheet">
+  <div class="sheet">
+    <div class="row"><h3 id="sheetTitle">添加 Key</h3></div>
+    <input type="hidden" id="editId">
+    <label>平台</label>
+    <select id="platform" onchange="onPlatformChange()"></select>
+    <label>备注名称</label>
+    <input id="label" placeholder="例如：主力账号 / 测试账号">
+    <label>API Key</label>
+    <input id="apiKey" placeholder="sk-xxxxxx" autocomplete="off">
+    <label>API Base URL（留空用平台默认）</label>
+    <input id="baseUrl" placeholder="https://api.deepseek.com">
+    <label>备注</label>
+    <input id="remark" placeholder="用途、额度说明等（可选）">
+    <div id="platformTip" class="sub" style="margin-top:10px"></div>
+    <div class="actions">
+      <button class="btn" onclick="save()">保存</button>
+      <button class="btn ghost" onclick="closeSheet()">取消</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+let PLATFORMS = [];
+
+function toast(msg){ const t=$('toast'); t.textContent=msg; t.style.display='block';
+  clearTimeout(window._tt); window._tt=setTimeout(()=>t.style.display='none',2200); }
+async function api(url,opt={}){ const r=await fetch(url,{...opt,headers:{'Content-Type':'application/json',...(opt.headers||{})}});
+  if(r.status===401){ showLogin(); throw new Error('未登录'); } return r.json(); }
+function showLogin(){ $('login').style.display='block'; $('app').style.display='none'; $('appHeader').style.display='none'; }
+function showApp(){ $('login').style.display='none'; $('app').style.display='flex'; $('appHeader').style.display='flex'; $('app').style.flexDirection='column'; }
+
+async function login(){ const pwd=$('pwd').value; if(!pwd){toast('请输入密码');return;}
+  const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pwd})});
+  if(r.ok){ $('pwd').value=''; showApp(); loadAll(); } else { toast('密码错误'); } }
+async function logout(){ await fetch('/api/logout',{method:'POST'}); showLogin(); }
+
+async function loadAll(){
+  const p=await api('/api/platforms'); PLATFORMS=p.items;
+  const sel=$('platform'); sel.innerHTML = PLATFORMS.map(x=>`<option value="${x.name}">${x.display}${x.support_balance?'（可查额度）':'（仅托管）'}</option>`).join('')
+    + '<option value="custom">自定义平台（仅托管 Key）</option>';
+  await render();
+}
+
+async function render(){
+  const d=await api('/api/accounts');
+  const el=$('list');
+  if(!d.items.length){ el.innerHTML='<div class="empty">还没有 Key，点右上角「+ 添加」开始</div>'; return; }
+  el.innerHTML = d.items.map(a=>{
+    const st = a.balance_status;
+    const dot = st==='ok'?'ok':(st==='error'||st==='invalid'?'err':(st==='unsupported'?'warn':''));
+    const amount = a.balance!=null ? `<span class="amount">${a.balance_currency==='USD'?'$':'¥'}${a.balance}</span>`
+      : `<span class="amount na">${st==='unsupported'?'该平台无公开余额接口':'未查询'}</span>`;
+    const ts = a.balance_updated_at ? new Date(a.balance_updated_at*1000).toLocaleString('zh-CN') : '';
+    return `<div class="card">
+      <div class="row">
+        <span class="dot ${dot}"></span>
+        <div style="flex:1">
+          <div class="title">${escape(a.platform_display)}${a.label?' · '+escape(a.label):''}</div>
+          <div class="sub">${escape(a.base_url||'-')}${a.remark?' · '+escape(a.remark):''}</div>
+        </div>
+        <div style="text-align:right">${amount}<div class="sub">${ts}</div></div>
+      </div>
+      <div class="kv"><span>${st==='invalid'?'Key 失效':st==='error'?'查询失败':st==='unsupported'?'不支持查询':'正常'}</span></div>
+      <div class="actions">
+        <button class="btn sm" onclick="copyKey(${a.id})">复制 Key</button>
+        <button class="btn sm ghost" onclick="refreshOne(${a.id})">刷新额度</button>
+        <button class="btn sm ghost" onclick="editAccount(${a.id})">编辑</button>
+        <button class="btn sm ghost" onclick="openConsole('${a.console}',${a.id})">去创建/管理 Key</button>
+        <button class="btn sm danger" onclick="delAccount(${a.id})">删除</button>
+      </div></div>`;
+  }).join('');
+}
+
+function escape(s){ return String(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+async function copyKey(id){
+  const d=await api(`/api/accounts/${id}/key`);
+  if(!d.ok){ toast(d.msg||'获取失败'); return; }
+  try{ await navigator.clipboard.writeText(d.api_key); toast('已复制到剪贴板'); }
+  catch(e){ prompt('请手动复制：', d.api_key); }
+}
+
+async function refreshOne(id){ toast('查询中…'); const d=await api(`/api/accounts/${id}/refresh`,{method:'POST'});
+  toast(d.ok?'余额已更新：'+d.balance:(d.msg||'查询失败')); await render(); }
+
+async function refreshAll(){ toast('正在刷新全部额度…'); const d=await api('/api/refresh-all',{method:'POST'});
+  toast(`完成：成功 ${d.ok_count} 个${d.failed&&d.failed.length?'，失败 '+d.failed.length+' 个':''}`); await render(); }
+
+function openAdd(){ $('editId').value=''; $('sheetTitle').textContent='添加 Key';
+  ['apiKey','label','baseUrl','remark'].forEach(k=>$(k).value=''); onPlatformChange(); $('sheet').style.display='flex'; }
+function closeSheet(){ $('sheet').style.display='none'; }
+async function editAccount(id){ const d=await api('/api/accounts'); const a=d.items.find(x=>x.id===id);
+  $('editId').value=id; $('sheetTitle').textContent='编辑 Key'; $('platform').value=a.platform;
+  $('label').value=a.label; $('baseUrl').value=a.base_url; $('remark').value=a.remark; $('apiKey').value='';
+  $('apiKey').placeholder='留空表示不修改'; onPlatformChange(); $('sheet').style.display='flex'; }
+
+function onPlatformChange(){ const p=PLATFORMS.find(x=>x.name===$('platform').value);
+  if(!p){ $('platformTip').textContent='自定义平台：仅做 Key 托管与复制，不查询额度。'; $('baseUrl').placeholder='https://your-api.example.com/v1'; return; }
+  $('baseUrl').placeholder=p.base_url||'';
+  $('platformTip').innerHTML = `${p.support_balance?'支持额度查询':'该平台无公开余额接口，仅托管 Key'} · 常用模型：<code>${(p.models||[]).join('</code> <code>')||'-'}</code>`;
+}
+
+async function save(){
+  const id=$('editId').value; const body={platform:$('platform').value,label:$('label').value,
+    api_key:$('apiKey').value,base_url:$('baseUrl').value,remark:$('remark').value};
+  if(!id && !body.api_key){ toast('请填写 API Key'); return; }
+  const r=await fetch(id?`/api/accounts/${id}`:'/api/accounts',{method:id?'PUT':'POST',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const d=await r.json();
+  if(!r.ok){ toast(d.msg||'保存失败'); return; }
+  closeSheet(); toast('已加密保存'); await render(); }
+
+async function delAccount(id){ if(!confirm('确认删除这条 Key 记录？')) return;
+  await api(`/api/accounts/${id}`,{method:'DELETE'}); toast('已删除'); await render(); }
+
+async function openConsole(url,id){ if(url){ window.open(url,'_blank'); toast('已打开官方控制台，创建新 Key 后回到这里添加'); } else toast('该平台无控制台链接'); }
+
+// 启动
+fetch('/api/platforms').then(r=>{ if(r.status===401){showLogin(); return null;} return r.json(); })
+  .then(d=>{ if(d){ showApp(); loadAll(); } });
+</script>
+</body>
+</html>
