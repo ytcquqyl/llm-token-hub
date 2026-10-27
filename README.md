@@ -1,5 +1,10 @@
 # LLM Token Hub · 多平台大模型 API Token 管理中枢
 
+[![Build and Publish Docker Image](https://github.com/ytcquqyl/llm-token-hub/actions/workflows/docker-image.yml/badge.svg)](https://github.com/ytcquqyl/llm-token-hub/actions/workflows/docker-image.yml)
+![镜像](https://img.shields.io/badge/ghcr.io-ytcquqyl%2Fllm--token--hub%3Alatest-blue?logo=docker)
+![架构](https://img.shields.io/badge/arch-amd64%20%7C%20arm64-green)
+![许可](https://img.shields.io/badge/license-MIT-lightgrey)
+
 一个部署在家庭 NAS / 服务器上的**自托管网页工具**：把你散落在各个大模型平台的 API Key **集中加密托管**，
 在同一界面**一键复制**、**一键刷新各平台剩余额度**，并提供**直达官方控制台**的入口去创建新 Key。
 
