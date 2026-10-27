@@ -1,0 +1,14 @@
+services:
+  llm-token-hub:
+    image: ghcr.io/ytcquqyl/llm-token-hub:latest   # 首次可改为 build: . 本地构建
+    container_name: llm-token-hub
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      ADMIN_PASSWORD: "请改成强密码"       # 必填：Web 访问密码
+      APP_SECRET: "请改成随机长字符串"     # 必填：API Key 加密主密钥（改了会导致旧 Key 无法解密）
+      DB_PATH: "/app/data/data.db"
+      TZ: "Asia/Shanghai"
+    volumes:
+      - ./data:/app/data
