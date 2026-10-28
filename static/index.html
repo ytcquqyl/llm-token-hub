@@ -53,6 +53,7 @@
 <header id="appHeader" style="display:none">
   <h1>LLM Token 中枢</h1>
   <button class="btn sm ghost" onclick="loadAll()">刷新</button>
+  <button class="btn sm ghost" onclick="openSettings()">设置</button>
   <button class="btn sm" onclick="openAdd()">+ 添加</button>
   <button class="btn sm ghost" onclick="logout()">退出</button>
 </header>
@@ -94,6 +95,37 @@
   </div>
 </div>
 
+<div class="overlay" id="setSheet">
+  <div class="sheet">
+    <div class="row"><h3>设置</h3><button class="btn sm ghost" onclick="closeSet()">关闭</button></div>
+
+    <div class="card">
+      <div class="title">修改登录密码</div>
+      <label>当前登录密码</label>
+      <input id="curPw" type="password" autocomplete="off">
+      <label>新登录密码（至少 6 位）</label>
+      <input id="newPw" type="password" autocomplete="off">
+      <label>确认新登录密码</label>
+      <input id="newPw2" type="password" autocomplete="off">
+      <button class="btn" style="margin-top:10px" onclick="changePassword()">保存登录密码</button>
+      <div class="sub" style="margin-top:6px">修改后其他设备的登录会话会失效，需重新登录。</div>
+    </div>
+
+    <div class="card">
+      <div class="title">修改加密密钥</div>
+      <div id="secHint" class="sub"></div>
+      <label>登录密码（确认身份）</label>
+      <input id="secLogin" type="password" autocomplete="off">
+      <label>新的加密密钥（至少 8 位）</label>
+      <input id="newSec" type="password" autocomplete="off">
+      <label>确认新加密密钥</label>
+      <input id="newSec2" type="password" autocomplete="off">
+      <button class="btn" style="margin-top:10px" onclick="changeSecret()">保存加密密钥</button>
+      <div class="sub" style="margin-top:6px">将用新密钥重新加密库内全部 Key；Key 较多时耗时稍长，过程中请勿关闭服务。</div>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -111,6 +143,47 @@ async function login(){ const pwd=$('pwd').value; if(!pwd){toast('请输入密�
   const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pwd})});
   if(r.ok){ $('pwd').value=''; showApp(); loadAll(); } else { toast('密码错误'); } }
 async function logout(){ await fetch('/api/logout',{method:'POST'}); showLogin(); }
+
+async function openSettings(){
+  const d=await api('/api/settings');
+  $('secHint').textContent = d.has_accounts
+    ? '当前库内已有 Key，保存后会对全部 Key 重新加密。'
+    : '当前库内暂无 Key，可直接设置加密密钥。';
+  $('setSheet').style.display='flex';
+}
+function closeSet(){ $('setSheet').style.display='none'; }
+
+async function changePassword(){
+  const cur=$('curPw').value, n1=$('newPw').value, n2=$('newPw2').value;
+  if(!cur||!n1){ toast('请填写完整'); return; }
+  if(n1.length<6){ toast('新密码至少 6 位'); return; }
+  if(n1!==n2){ toast('两次输入不一致'); return; }
+  const r=await fetch('/api/settings/password',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({current:cur,new:n1})});
+  const d=await r.json();
+  if(!r.ok){ toast(d.msg||'修改失败'); return; }
+  toast('登录密码已修改，请重新登录');
+  ['curPw','newPw','newPw2'].forEach(k=>$(k).value='');
+  closeSet();
+  await fetch('/api/logout',{method:'POST'});
+  showLogin();
+}
+
+async function changeSecret(){
+  const login=$('secLogin').value, n1=$('newSec').value, n2=$('newSec2').value;
+  if(!login||!n1){ toast('请填写完整'); return; }
+  if(n1.length<8){ toast('加密密钥至少 8 位'); return; }
+  if(n1!==n2){ toast('两次输入不一致'); return; }
+  if(!confirm('确认用新密钥重新加密库内全部 Key？')) return;
+  toast('正在重新加密，请稍候…');
+  const r=await fetch('/api/settings/secret',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({login_password:login,new_secret:n1})});
+  const d=await r.json();
+  if(!r.ok){ toast(d.msg||'修改失败'); return; }
+  toast('加密密钥已更新');
+  ['secLogin','newSec','newSec2'].forEach(k=>$(k).value='');
+  closeSet();
+}
 
 async function loadAll(){
   const p=await api('/api/platforms'); PLATFORMS=p.items;

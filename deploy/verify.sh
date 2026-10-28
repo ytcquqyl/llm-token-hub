@@ -48,9 +48,27 @@ else
   echo "  [跳过] 未找到挂载的 data.db"
 fi
 
-echo "== 7. 清理测试数据 =="
+echo "== 7. 修改登录密码（验证旧密码失效 / 新密码可用）=="
+NEWPASS="NewPass-verify-$(date +%s)"
+curl -fsS -c /tmp/hub_ck2 -X POST "$BASE/api/login" -H 'Content-Type: application/json' -d "{\"password\":\"$PASSWORD\"}" >/dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/settings/password" -H 'Content-Type: application/json' -b /tmp/hub_ck2 -d "{\"current\":\"$PASSWORD\",\"new\":\"$NEWPASS\"}")
+[[ "$code" == "200" ]]; check $? "修改登录密码接口返回 200（实际 $code）"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/login" -H 'Content-Type: application/json' -d "{\"password\":\"$PASSWORD\"}")
+[[ "$code" == "401" ]]; check $? "旧密码登录被拒(401，实际 $code)"
+curl -fsS -c /tmp/hub_ck3 -X POST "$BASE/api/login" -H 'Content-Type: application/json' -d "{\"password\":\"$NEWPASS\"}" >/dev/null; check $? "新密码登录成功"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/settings/password" -H 'Content-Type: application/json' -b /tmp/hub_ck3 -d "{\"current\":\"$NEWPASS\",\"new\":\"$PASSWORD\"}")
+[[ "$code" == "200" ]]; check $? "改回原密码成功（保持环境干净）"
+
+echo "== 8. 修改加密密钥（验证重加密后仍能解密）=="
+NEWSEC="NewSecret-verify-$(date +%s)"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/settings/secret" -H 'Content-Type: application/json' -b /tmp/hub_ck3 -d "{\"login_password\":\"$PASSWORD\",\"new_secret\":\"$NEWSEC\"}")
+[[ "$code" == "200" ]]; check $? "修改加密密钥接口返回 200（实际 $code）"
+PLAIN2=$(curl -fsS -b /tmp/hub_ck3 "$BASE/api/accounts/$GOT/key" | grep -o '"api_key":"[^"]*"' | cut -d'"' -f4)
+[[ "$PLAIN2" == "$TESTKEY" ]]; check $? "重加密后解密读回明文一致（$PLAIN2）"
+
+echo "== 9. 清理测试数据 =="
 curl -fsS -b /tmp/hub_ck -X DELETE "$BASE/api/accounts/$GOT" >/dev/null; check $? "已删除自检记录"
-rm -f /tmp/hub_ck
+rm -f /tmp/hub_ck /tmp/hub_ck2 /tmp/hub_ck3
 
 echo
 echo "通过 $pass 项，失败 $fail 项"

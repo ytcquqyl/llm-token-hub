@@ -147,5 +147,8 @@ cat <<EOF
     重启：    docker compose restart
     升级：    docker compose pull && docker compose up -d
     备份：    cp ${DIR}/data/data.db ~/llm-token-hub-$(date +%F).db
+
+提示：登录密码与加密密钥都可在网页顶栏「设置」里随时修改并持久化，
+      无需重建容器；改加密密钥会用新密钥自动重加密库内全部 Key。
 ==========================================
 EOF

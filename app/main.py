@@ -3,8 +3,10 @@ LLM Token Hub —— 多平台大模型 API Token 管理中枢（网页版 / 容
 
 · 服务端：FastAPI + SQLite，Docker 一键部署到家庭 NAS，手机浏览器直接访问
 · Key 使用主密钥派生（APP_SECRET / ADMIN_PASSWORD）AES(Fernet) 加密落盘，数据库泄露也不暴露明文
+· 登录密码与加密密钥均支持在页面内修改并持久化（默认仅容器创建时通过环境变量设定）
+· 修改加密密钥会原子地用新密钥重新加密库内全部 Key
 · 服务端代理查询各平台余额，前端无跨域问题
-· 访问控制：ADMIN_PASSWORD 环境变量设置访问密码，登录后下发 Cookie 会话
+· 访问控制：密码登录后下发 HttpOnly Cookie 会话
 """
 import base64
 import hashlib
@@ -13,6 +15,7 @@ import os
 import secrets
 import sqlite3
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
@@ -27,10 +30,10 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "changeme")
 APP_SECRET = os.environ.get("APP_SECRET", "")
 SESSION_TTL = int(os.environ.get("SESSION_TTL", str(12 * 3600)))  # 会话时长，默认 12 小时
 
-source = APP_SECRET if APP_SECRET else "llm-token-hub::" + ADMIN_PASSWORD
-fernet = Fernet(base64.urlsafe_b64encode(hashlib.sha256(source.encode()).digest()))
+# 模块级全局密钥对象；启动后由 init_app 与修改密钥接口重建
+_source = APP_SECRET if APP_SECRET else "llm-token-hub::" + ADMIN_PASSWORD
+fernet = Fernet(base64.urlsafe_b64encode(hashlib.sha256(_source.encode()).digest()))
 
-app = FastAPI(title="LLM Token Hub", version="1.0.0")
 
 # ---------------- 平台配置表 ----------------
 # balance = None 表示该平台未开放公开的余额查询接口，UI 降级为「跳转控制台查看」
@@ -83,11 +86,13 @@ PLATFORMS = {
     },
 }
 
+
 # ---------------- 数据库 ----------------
 def db() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")  # 读写并发，减少锁争用
     conn.execute("""CREATE TABLE IF NOT EXISTS accounts(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         platform TEXT NOT NULL,
@@ -100,11 +105,69 @@ def db() -> sqlite3.Connection:
         balance_status TEXT NOT NULL DEFAULT '',
         balance_updated_at INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS settings(
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL)""")
     conn.commit()
     return conn
 
+
+# ---------------- 设置读写 ----------------
+def get_setting(key: str, default=None):
+    conn = db()
+    try:
+        row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else default
+    finally:
+        conn.close()
+
+
+def set_setting(key: str, value: str):
+    conn = db()
+    try:
+        conn.execute(
+            "INSERT INTO settings(key,value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def hash_pw(pw: str) -> str:
+    return hashlib.sha256(pw.encode()).hexdigest()
+
+
+def rebuild_fernet(secret: str):
+    global fernet
+    fernet = Fernet(base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest()))
+
+
+# ---------------- 启动初始化 ----------------
+def init_app():
+    """首启：用环境变量为密码/密钥播种；之后以库内设置为准。"""
+    if get_setting("admin_pw_hash") is None:
+        set_setting("admin_pw_hash", hash_pw(ADMIN_PASSWORD))
+    secret = get_setting("app_secret")
+    if secret is None:
+        secret = APP_SECRET if APP_SECRET else secrets.token_urlsafe(32)
+        set_setting("app_secret", secret)
+    rebuild_fernet(secret)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    init_app()
+    yield
+
+
+app = FastAPI(title="LLM Token Hub", version="1.1.0", lifespan=lifespan)
+
+
 # ---------------- 会话 ----------------
 SESSIONS: dict = {}
+
 
 def make_session() -> str:
     now = time.time()
@@ -114,23 +177,28 @@ def make_session() -> str:
     SESSIONS[token] = now + SESSION_TTL
     return token
 
+
 def require_session(request: Request) -> str:
     token = request.cookies.get("hub_session", "")
     if not token or SESSIONS.get(token, 0) < time.time():
         raise HTTPException(status_code=401, detail="未登录或会话已过期")
     return token
 
+
 # ---------------- 工具 ----------------
 def encrypt_key(plain: str) -> str:
     return fernet.encrypt(plain.encode()).decode()
 
+
 def decrypt_key(cipher: str) -> str:
     return fernet.decrypt(cipher.encode()).decode()
+
 
 def mask(key: str) -> str:
     if len(key) <= 8:
         return "****"
     return key[:4] + "*" * max(4, len(key) - 8) + key[-4:]
+
 
 def get_by_path(obj, path: str):
     cur = obj
@@ -147,6 +215,7 @@ def get_by_path(obj, path: str):
         else:
             return None
     return cur
+
 
 def row_to_dict(r: sqlite3.Row) -> dict:
     return {
@@ -165,22 +234,25 @@ def row_to_dict(r: sqlite3.Row) -> dict:
         "support_balance": PLATFORMS.get(r["platform"], {}).get("balance") is not None,
     }
 
+
 # ---------------- 接口 ----------------
 @app.post("/api/login")
 async def login(request: Request):
     body = await request.json()
-    if str(body.get("password", "")) != ADMIN_PASSWORD:
+    if hash_pw(str(body.get("password", ""))) != get_setting("admin_pw_hash"):
         return JSONResponse({"ok": False, "msg": "密码错误"}, status_code=401)
     token = make_session()
     resp = JSONResponse({"ok": True})
     resp.set_cookie("hub_session", token, httponly=True, samesite="lax", max_age=SESSION_TTL)
     return resp
 
+
 @app.post("/api/logout")
 async def logout(_: str = Depends(require_session)):
     resp = JSONResponse({"ok": True})
     resp.delete_cookie("hub_session")
     return resp
+
 
 @app.get("/api/platforms")
 async def platforms(_: str = Depends(require_session)):
@@ -191,6 +263,7 @@ async def platforms(_: str = Depends(require_session)):
         for k, v in PLATFORMS.items()
     ]}
 
+
 @app.get("/api/accounts")
 async def list_accounts(_: str = Depends(require_session)):
     conn = db()
@@ -200,6 +273,7 @@ async def list_accounts(_: str = Depends(require_session)):
         return {"items": items}
     finally:
         conn.close()
+
 
 @app.post("/api/accounts")
 async def add_account(request: Request, _: str = Depends(require_session)):
@@ -225,6 +299,7 @@ async def add_account(request: Request, _: str = Depends(require_session)):
         conn.close()
     return {"ok": True}
 
+
 @app.put("/api/accounts/{account_id}")
 async def update_account(account_id: int, request: Request, _: str = Depends(require_session)):
     body = await request.json()
@@ -248,6 +323,7 @@ async def update_account(account_id: int, request: Request, _: str = Depends(req
         conn.close()
     return {"ok": True}
 
+
 @app.delete("/api/accounts/{account_id}")
 async def delete_account(account_id: int, _: str = Depends(require_session)):
     conn = db()
@@ -257,6 +333,7 @@ async def delete_account(account_id: int, _: str = Depends(require_session)):
     finally:
         conn.close()
     return {"ok": True}
+
 
 @app.get("/api/accounts/{account_id}/key")
 async def reveal_key(account_id: int, _: str = Depends(require_session)):
@@ -275,6 +352,7 @@ async def reveal_key(account_id: int, _: str = Depends(require_session)):
     finally:
         conn.close()
 
+
 @app.post("/api/accounts/{account_id}/refresh")
 async def refresh_one(account_id: int, _: str = Depends(require_session)):
     conn = db()
@@ -291,6 +369,7 @@ async def refresh_one(account_id: int, _: str = Depends(require_session)):
                 "currency": result["currency"]}
     finally:
         conn.close()
+
 
 @app.post("/api/refresh-all")
 async def refresh_all(_: str = Depends(require_session)):
@@ -312,6 +391,77 @@ async def refresh_all(_: str = Depends(require_session)):
         return {"ok": True, "ok_count": ok_count, "failed": failed}
     finally:
         conn.close()
+
+
+# ---------------- 设置：修改密码 / 加密密钥 ----------------
+@app.get("/api/settings")
+async def get_settings(_: str = Depends(require_session)):
+    conn = db()
+    try:
+        n = conn.execute("SELECT COUNT(*) AS c FROM accounts").fetchone()["c"]
+    finally:
+        conn.close()
+    return {"has_accounts": n > 0, "secret_managed": get_setting("app_secret") is not None}
+
+
+@app.post("/api/settings/password")
+async def change_password(request: Request, _: str = Depends(require_session)):
+    body = await request.json()
+    cur = str(body.get("current", ""))
+    new = str(body.get("new", ""))
+    if len(new) < 6:
+        return JSONResponse({"ok": False, "msg": "新密码至少 6 位"}, status_code=400)
+    if hash_pw(cur) != get_setting("admin_pw_hash"):
+        return JSONResponse({"ok": False, "msg": "当前密码错误"}, status_code=403)
+    set_setting("admin_pw_hash", hash_pw(new))
+    # 密码变更后强制所有会话失效，需重新登录
+    SESSIONS.clear()
+    return {"ok": True}
+
+
+@app.post("/api/settings/secret")
+async def change_secret(request: Request, _: str = Depends(require_session)):
+    body = await request.json()
+    login_pw = str(body.get("login_password", ""))
+    new_secret = str(body.get("new_secret", ""))
+    if len(new_secret) < 8:
+        return JSONResponse({"ok": False, "msg": "新加密密钥至少 8 位"}, status_code=400)
+    if hash_pw(login_pw) != get_setting("admin_pw_hash"):
+        return JSONResponse({"ok": False, "msg": "登录密码错误，无法修改加密密钥"}, status_code=403)
+    try:
+        reencrypt_all(new_secret)
+    except ValueError as e:
+        return JSONResponse({"ok": False, "msg": str(e)}, status_code=400)
+    return {"ok": True, "msg": "加密密钥已更新并重加密全部 Key"}
+
+
+def reencrypt_all(new_secret: str):
+    """用新密钥原子地重新加密全部 Key；任一条解密失败则整体中止（不落脏数据）。"""
+    global fernet
+    old_fernet = fernet
+    new_fernet = Fernet(base64.urlsafe_b64encode(hashlib.sha256(new_secret.encode()).digest()))
+    conn = db()
+    try:
+        rows = conn.execute("SELECT id, key_encrypted FROM accounts").fetchall()
+        updates = []
+        for r in rows:
+            try:
+                plain = old_fernet.decrypt(r["key_encrypted"].encode()).decode()
+            except InvalidToken:
+                raise ValueError(f"记录 id={r['id']} 解密失败，已中止（未改动任何数据）")
+            updates.append((new_fernet.encrypt(plain.encode()).decode(), r["id"]))
+        for enc, rid in updates:
+            conn.execute("UPDATE accounts SET key_encrypted=? WHERE id=?", (enc, rid))
+        conn.execute(
+            "INSERT INTO settings(key,value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            ("app_secret", new_secret),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    fernet = new_fernet
+
 
 async def query_balance(r: sqlite3.Row) -> dict:
     cfg = PLATFORMS.get(r["platform"])
@@ -346,12 +496,15 @@ async def query_balance(r: sqlite3.Row) -> dict:
                 "msg": f"网络错误或超时：{type(e).__name__}"}
     return {"ok": True, "balance": value, "currency": b["currency"], "status": "ok", "msg": "ok"}
 
+
 # ---------------- 静态页面 ----------------
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+
 
 @app.get("/")
 async def index():
     return FileResponse(str(BASE_DIR / "static" / "index.html"))
+
 
 @app.get("/healthz")
 async def healthz():

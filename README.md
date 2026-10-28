@@ -1,10 +1,5 @@
 # LLM Token Hub · 多平台大模型 API Token 管理中枢
 
-[![Build and Publish Docker Image](https://github.com/ytcquqyl/llm-token-hub/actions/workflows/docker-image.yml/badge.svg)](https://github.com/ytcquqyl/llm-token-hub/actions/workflows/docker-image.yml)
-![镜像](https://img.shields.io/badge/ghcr.io-ytcquqyl%2Fllm--token--hub%3Alatest-blue?logo=docker)
-![架构](https://img.shields.io/badge/arch-amd64%20%7C%20arm64-green)
-![许可](https://img.shields.io/badge/license-MIT-lightgrey)
-
 一个部署在家庭 NAS / 服务器上的**自托管网页工具**：把你散落在各个大模型平台的 API Key **集中加密托管**，
 在同一界面**一键复制**、**一键刷新各平台剩余额度**，并提供**直达官方控制台**的入口去创建新 Key。
 
@@ -69,8 +64,8 @@ docker run -d --name llm-token-hub \
 
 | 变量 | 必填 | 说明 |
 |------|------|------|
-| `ADMIN_PASSWORD` | ✅ | Web 访问密码（也是未设 APP_SECRET 时的加密密钥来源） |
-| `APP_SECRET` | ✅ 建议 | API Key 加密主密钥。**更换后旧 Key 将无法解密，需重新录入** |
+| `ADMIN_PASSWORD` | ✅ | Web 访问密码（初始值，部署后可在页面「设置」中修改并持久化） |
+| `APP_SECRET` | 建议 | API Key 加密主密钥（初始值；未设置则自动随机生成并入库）。部署后可在页面「设置」中修改，修改会用新密钥重加密全部 Key |
 | `DB_PATH` | 可选 | SQLite 路径，默认 `/app/data/data.db`（务必落在挂载卷内） |
 | `SESSION_TTL` | 可选 | 会话时长（秒），默认 43200（12 小时） |
 
@@ -84,9 +79,20 @@ docker run -d --name llm-token-hub \
 
 ---
 
-## 三、安全设计
+## 三、在页面内修改登录密码与加密密钥（v1.1 新增）
 
-- **Key 不明文落盘**：使用 Fernet（AES-128-CBC + HMAC）加密，密钥由 `APP_SECRET` / `ADMIN_PASSWORD` 经 SHA-256 派生；数据库文件被拷贝也无法还原明文（已实测：库内无 `sk-` 明文字符串）。
+容器创建时通过环境变量设的 `ADMIN_PASSWORD` / `APP_SECRET` 只是**初始值**。部署后，两者都可以在网页里随时修改并持久化，**无需重建容器、重启也不丢**。
+
+- **修改登录密码**：顶栏「设置 → 修改登录密码」，填当前密码 + 新密码（≥6 位）。修改后所有已登录会话立即失效，需重新登录。
+- **修改加密密钥**：「设置 → 修改加密密钥」，填登录密码（确认身份）+ 新密钥（≥8 位）。提交后会**用新密钥原子地重新加密库内全部 Key**；若任意一条旧 Key 解密失败，整体中止、不落脏数据。
+
+> ⚠️ 加密密钥改完，旧的 `APP_SECRET` 即失效；若日后需迁移 / 恢复备份，请用**新密钥**对应的数据。修改前建议先备份 `data/data.db`。
+
+---
+
+## 四、安全设计
+
+- **Key 不明文落盘**：API Key 以 Fernet（AES-128-CBC + HMAC）加密，主密钥由 `APP_SECRET` 经 SHA-256 派生。主密钥在首次运行时落库到数据卷的 `settings` 表（容器创建时可用环境变量 `APP_SECRET` 指定；未指定则自动随机生成）。因此**保护边界从「仅环境变量」变为「整个数据卷」**：数据库与密钥同处 `data/` 目录，请对该目录统一做好访问控制与备份加密（已实测：库内无 `sk-` 明文字符串）。
 - **访问鉴权**：未登录访问任意 `/api/*` 返回 401，登录后下发 HttpOnly Cookie，默认 12 小时过期。
 - **明文按需取用**：列表页不渲染明文，点「复制」时才向服务端请求一次。
 - **网络最小化**：仅服务端向各平台官方域名发 HTTPS 请求，无遥测、无外发。
@@ -94,11 +100,11 @@ docker run -d --name llm-token-hub \
 生产建议：
 1. 只在内网 / VPN（Tailscale、WireGuard）暴露，或前面挂反向代理 + HTTPS；
 2. 用 Nginx/Caddy 反代并加 Basic Auth 双保险；
-3. 定期备份 `data/data.db`（但记住：**备份 + `APP_SECRET` 才能解密**）。
+3. 定期备份 `data/data.db`（备份本身已包含主密钥与全部数据；但迁移到新机器时**必须连同 `settings` 表中的密钥一起**，单独拷走旧 `APP_SECRET` 变量已无法解密新密钥加密的数据）。
 
 ---
 
-## 四、接口一览
+## 五、接口一览
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -112,11 +118,14 @@ docker run -d --name llm-token-hub \
 | GET | `/api/accounts/{id}/key` | 取明文 Key |
 | POST | `/api/accounts/{id}/refresh` | 刷新单个额度 |
 | POST | `/api/refresh-all` | 刷新全部额度 |
+| GET | `/api/settings` | 设置状态（是否有 Key、密钥是否已托管） |
+| POST | `/api/settings/password` | 修改登录密码 |
+| POST | `/api/settings/secret` | 修改加密密钥并重加密全部 Key |
 | GET | `/healthz` | 健康检查（Docker HEALTHCHECK 使用） |
 
 ---
 
-## 五、本地开发
+## 六、本地开发
 
 ```bash
 pip install -r requirements.txt
@@ -124,15 +133,16 @@ ADMIN_PASSWORD=dev APP_SECRET=dev DB_PATH=./data/data.db \
   uvicorn app.main:app --reload --host 0.0.0.0 --port 8787
 ```
 
-## 六、路线图
+## 七、路线图
 
+- [x] 页面内修改登录密码与加密密钥（v1.1）
 - [ ] 自定义平台支持手动填写余额接口路径
 - [ ] 额度变化历史与趋势图
 - [ ] 低余额提醒（Webhook / 邮件 / Bark）
 - [ ] 导出为环境变量 / JSON 配置片段，方便一键粘贴进其他工具
 - [ ] 硅基流动等开放平台尝试在线创建 Key（待平台能力确认）
 
-## 七、从 GHCR 拉取镜像（NAS 部署推荐）
+## 八、从 GHCR 拉取镜像（NAS 部署推荐）
 
 项目已接入 GitHub Actions：推送到 `main` 或打 `v*` tag 后，自动构建多架构镜像（amd64 / arm64）并发布到 GHCR。
 
@@ -151,6 +161,6 @@ cd /vol1/1000/docker/llm-token-hub && docker compose up -d
 bash deploy/publish-github.sh
 ```
 
-## 八、许可
+## 九、许可
 
 MIT License
