@@ -203,6 +203,7 @@ let ACCOUNTS = [];
 let MODELS = [];
 let currentTab = 'tokens';
 let lastModels = [];
+let lastSource = '';
 
 function toast(msg){ const t=$('toast'); t.textContent=msg; t.style.display='block';
   clearTimeout(window._tt); window._tt=setTimeout(()=>t.style.display='none',2200); }
@@ -339,17 +340,37 @@ async function render(){
 
 function escape(s){ return String(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
+// 复制到剪贴板：Clipboard API → execCommand 兜底 → 弹窗（http 内网也能一键复制）
+function doCopy(text){
+  return new Promise(resolve=>{
+    const done=ok=>resolve(ok);
+    const fallback=()=>{
+      try{
+        const ta=document.createElement('textarea');
+        ta.value=text; ta.setAttribute('readonly','');
+        ta.style.cssText='position:fixed;left:-9999px;top:0;opacity:0';
+        document.body.appendChild(ta);
+        ta.select(); ta.setSelectionRange(0,text.length);
+        const ok=document.execCommand('copy');
+        document.body.removeChild(ta);
+        done(ok);
+      }catch(e){ done(false); }
+    };
+    if(navigator.clipboard && window.isSecureContext){
+      navigator.clipboard.writeText(text).then(()=>done(true)).catch(fallback);
+    } else fallback();
+  });
+}
+
 async function copyKey(id){
   const d=await api(`/api/accounts/${id}/key`);
   if(!d.ok){ toast(d.msg||'获取失败'); return; }
-  try{ await navigator.clipboard.writeText(d.api_key); toast('已复制 Key'); }
-  catch(e){ prompt('请手动复制：', d.api_key); }
+  (await doCopy(d.api_key)) ? toast('已复制 Key') : prompt('请手动复制：', d.api_key);
 }
 async function copyAddress(id){
   const a=ACCOUNTS.find(x=>x.id===id);
   if(!a || !a.base_url){ toast('该账号无 API 地址'); return; }
-  try{ await navigator.clipboard.writeText(a.base_url); toast('已复制 API 地址'); }
-  catch(e){ prompt('请手动复制：', a.base_url); }
+  (await doCopy(a.base_url)) ? toast('已复制 API 地址') : prompt('请手动复制：', a.base_url);
 }
 async function copyConfig(id){
   const a=ACCOUNTS.find(x=>x.id===id);
@@ -357,8 +378,7 @@ async function copyConfig(id){
   const d=await api(`/api/accounts/${id}/key`);
   if(!d.ok){ toast(d.msg||'获取失败'); return; }
   const text = `base_url: ${a.base_url||'(平台默认)'}\napi_key: ${d.api_key}`;
-  try{ await navigator.clipboard.writeText(text); toast('已复制 地址+Key'); }
-  catch(e){ prompt('请手动复制：', text); }
+  (await doCopy(text)) ? toast('已复制 地址+Key') : prompt('请手动复制：', text);
 }
 
 async function refreshOne(id){ toast('查询中…'); const d=await api(`/api/accounts/${id}/refresh`,{method:'POST'});
@@ -410,7 +430,7 @@ async function renderModels(){
       <div class="row">
         <div style="flex:1">
           <div class="title">${escape(m.name)}</div>
-          <div class="sub">来源：${m.source==='import'?'平台导入':m.source==='manual'?'手动添加':'添加'} · 更新于 ${new Date(m.updated_at*1000).toLocaleString('zh-CN')}</div>
+          <div class="sub">来源：${m.source_label?`来自 ${escape(m.source_label)}`:(m.source==='manual'?'手动添加':'平台导入')} · 更新于 ${new Date(m.updated_at*1000).toLocaleString('zh-CN')}</div>
         </div>
       </div>
       <div class="card2" style="margin-top:8px;white-space:pre-wrap;font-size:13px;line-height:1.6;color:var(--text)">
@@ -438,6 +458,8 @@ function closeImport(){ $('importSheet').style.display='none'; }
 
 async function queryAccountModels(id){
   toast('查询模型中…');
+  const acc=ACCOUNTS.find(x=>x.id===id);
+  lastSource=acc ? ((acc.platform_display||'')+(acc.label?' · '+acc.label:'')) : '';
   const d=await api(`/api/accounts/${id}/models`,{method:'POST'});
   if(!d.ok){ toast(d.msg||'查询失败'); return; }
   lastModels=d.items;
@@ -449,7 +471,7 @@ async function queryAccountModels(id){
 async function importSelected(){
   const names=lastModels.filter((_,i)=>$(`imp_${i}`)?.checked);
   if(!names.length){ toast('请至少勾选一个'); return; }
-  for(const n of names){ await api('/api/models',{method:'POST',body:JSON.stringify({name:n,source:'import'})}); }
+  for(const n of names){ await api('/api/models',{method:'POST',body:JSON.stringify({name:n,source:'import',source_label:lastSource||''})}); }
   toast(`已导入 ${names.length} 个模型`);
   $('importResults').innerHTML='';
   await renderModels();
@@ -472,8 +494,7 @@ async function saveModel(){
 async function delModel(id){ if(!confirm('确认删除该模型？')) return;
   await api(`/api/models/${id}`,{method:'DELETE'}); toast('已删除'); await renderModels(); }
 async function copyModelName(id){ const m=MODELS.find(x=>x.id===id);
-  try{ await navigator.clipboard.writeText(m.name); toast('已复制模型名'); }
-  catch(e){ prompt('请手动复制：',m.name); } }
+  (await doCopy(m.name)) ? toast('已复制模型名') : prompt('请手动复制：',m.name); }
 async function aiDescribe(id){
   toast('AI 生成中，请稍候…');
   const d=await api(`/api/models/${id}/ai-describe`,{method:'POST'});

@@ -116,8 +116,13 @@ def db() -> sqlite3.Connection:
         name TEXT NOT NULL UNIQUE,
         description TEXT NOT NULL DEFAULT '',
         source TEXT NOT NULL DEFAULT '',
+        source_label TEXT NOT NULL DEFAULT '',
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL)""")
+    try:  # v1.2.1 迁移：为旧库补充来源标注列
+        conn.execute("ALTER TABLE models ADD COLUMN source_label TEXT NOT NULL DEFAULT ''")
+    except Exception:
+        pass
     conn.commit()
     return conn
 
@@ -203,7 +208,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="LLM Token Hub", version="1.2.0", lifespan=lifespan)
+app = FastAPI(title="LLM Token Hub", version="1.2.1", lifespan=lifespan)
 
 
 # ---------------- 会话 ----------------
@@ -577,7 +582,9 @@ async def query_account_models(account_id: int, _: str = Depends(require_session
             return JSONResponse({"ok": False, "msg": f"HTTP {resp.status_code}"}, status_code=400)
         data = resp.json()
         items = [m.get("id") for m in data.get("data", []) if m.get("id")]
-        return {"ok": True, "url": url, "items": items, "count": len(items)}
+        return {"ok": True, "url": url, "items": items, "count": len(items),
+                "platform_display": cfg["display"] if cfg else r["platform"],
+                "label": r["label"] or ""}
     except Exception as e:
         return JSONResponse({"ok": False, "msg": f"网络错误或超时：{type(e).__name__}"}, status_code=400)
 
@@ -604,15 +611,16 @@ async def add_model(request: Request, _: str = Depends(require_session)):
     try:
         cur = conn.execute("SELECT id FROM models WHERE name=?", (name,)).fetchone()
         if cur:
-            conn.execute("UPDATE models SET description=?,source=?,updated_at=? WHERE id=?",
-                         (str(body.get("description", "")), str(body.get("source", "manual")),
-                          int(time.time()), cur["id"]))
+            conn.execute(
+                "UPDATE models SET description=?,source=?,source_label=?,updated_at=? WHERE id=?",
+                (str(body.get("description", "")), str(body.get("source", "manual")),
+                 str(body.get("source_label", "")), int(time.time()), cur["id"]))
             mid = cur["id"]
         else:
             cur = conn.execute(
-                "INSERT INTO models(name,description,source,created_at,updated_at) VALUES(?,?,?,?,?)",
+                "INSERT INTO models(name,description,source,source_label,created_at,updated_at) VALUES(?,?,?,?,?,?)",
                 (name, str(body.get("description", "")), str(body.get("source", "manual")),
-                 int(time.time()), int(time.time())))
+                 str(body.get("source_label", "")), int(time.time()), int(time.time())))
             mid = cur.lastrowid
         conn.commit()
         row = conn.execute("SELECT * FROM models WHERE id=?", (mid,)).fetchone()
@@ -675,16 +683,34 @@ async def ai_describe(model_id: int, _: str = Depends(require_session)):
     headers = {"Authorization": "Bearer " + ai_key, "Content-Type": "application/json"}
     payload = {"model": cfg["ai_model"] or "gpt-4o-mini",
                "messages": [{"role": "user", "content": prompt}],
-               "temperature": 0.6, "max_tokens": 400}
+               "temperature": 0.6, "max_tokens": 800}
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(url, headers=headers, json=payload)
         if resp.status_code >= 400:
-            return JSONResponse({"ok": False, "msg": f"AI 接口返回 HTTP {resp.status_code}"}, status_code=400)
+            detail = resp.text[:200]
+            return JSONResponse({"ok": False,
+                                 "msg": f"AI 接口返回 HTTP {resp.status_code}：{detail}"}, status_code=400)
         data = resp.json()
-        text = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        choice = (data.get("choices") or [{}])[0]
+        msg = choice.get("message") or {}
+        # 逐级兜底解析：content 字符串 / 分段数组 / reasoning_content / choices[0].text
+        text = ""
+        c = msg.get("content")
+        if isinstance(c, str):
+            text = c.strip()
+        elif isinstance(c, list):
+            text = "".join(x.get("text", "") for x in c if isinstance(x, dict)).strip()
         if not text:
-            return JSONResponse({"ok": False, "msg": "AI 返回内容为空"}, status_code=400)
+            text = str(msg.get("reasoning_content") or "").strip()
+        if not text:
+            text = str(choice.get("text") or "").strip()
+        if not text:
+            fr = choice.get("finish_reason")
+            raw = json.dumps(data, ensure_ascii=False)[:200]
+            return JSONResponse({"ok": False,
+                                 "msg": f"AI 返回内容为空（finish_reason={fr}）响应片段：{raw}"},
+                                status_code=400)
     except Exception as e:
         return JSONResponse({"ok": False, "msg": f"调用 AI 失败：{type(e).__name__}"}, status_code=400)
     conn = db()
