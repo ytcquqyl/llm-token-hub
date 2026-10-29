@@ -16,6 +16,9 @@
 | 额度看板（已用/剩余） | ✅ 部分支持 | DeepSeek / 智谱 GLM / Moonshot(Kimi) / 硅基流动 可实时查询 |
 | 一键刷新全部额度 | ✅ 支持 | 服务端并发代理查询，避免浏览器跨域限制 |
 | 自动创建新 Token | ⚠️ 受平台限制 | **各家均未开放免登录的 Key 创建 API**，本项目提供各平台控制台直达入口：App 内打开 → 网页创建 → 复制回来粘贴即可 |
+| 复制 API 地址 / 一键复制「地址+Key」 | ✅ 支持 | 除「复制 Key」外，可单独复制 Base URL，或复制可直接粘贴进客户端的 `base_url + api_key` 配置片段 |
+| 模型库（模型清单 + 适用场景说明） | ✅ 支持 | 「模型库」页可从平台 OpenAI 兼容 `/v1/models` 接口导入模型，并为每个模型手写适用场景说明 |
+| AI 自动生成适用场景 | ✅ 支持 | 在「设置」里配置一个 OpenAI 兼容接口后，一键让 AI 为某个模型生成「能力特点 + 适用场景」说明 |
 
 ### 各平台余额接口现状
 
@@ -79,7 +82,20 @@ docker run -d --name llm-token-hub \
 
 ---
 
-## 三、在页面内修改登录密码与加密密钥（v1.1 新增）
+## 三、模型库与 AI 适用场景说明（v1.2）
+
+除托管 Key 外，v1.2 新增「**模型库**」页，帮你把"每个模型适合干什么"沉淀下来：
+
+- **从平台导入模型**：在模型库点「从平台导入模型」→ 选择一个已添加的账号 → 自动调用该账号平台的 OpenAI 兼容 `/v1/models` 接口拉取模型列表 → 勾选后导入。支持 DeepSeek / 硅基流动 / Moonshot / OpenAI / 通义千问 等所有兼容 `/v1/models` 的平台。
+- **手写适用场景说明**：每个模型可编辑一段说明 / 备注（如"擅长中文写作、代码生成、知识问答"），团队共享一份模型选型笔记。
+- **AI 自动生成说明**：在「设置 → AI 模型说明配置」里填一个 OpenAI 兼容接口的 Base URL、模型名与 API Key（密钥同样以加密方式存储），之后在模型库点「AI 生成说明」，系统会把模型名发给该 AI，由其返回该模型的能力特点与 3–5 个适用场景并自动回填。
+- **一键复制模型名**：便于直接粘贴进代码或对话客户端。
+
+> ⚠️ AI 说明依赖你自配的第三方大模型接口，生成内容为模型回答，**请自行核对准确性**，本工具不对其正确性背书。AI Key 与账号 Key 使用同一主密钥加密，修改加密密钥时会一并重加密。
+
+---
+
+## 四、在页面内修改登录密码与加密密钥（v1.1 新增）
 
 容器创建时通过环境变量设的 `ADMIN_PASSWORD` / `APP_SECRET` 只是**初始值**。部署后，两者都可以在网页里随时修改并持久化，**无需重建容器、重启也不丢**。
 
@@ -90,11 +106,12 @@ docker run -d --name llm-token-hub \
 
 ---
 
-## 四、安全设计
+## 五、安全设计
 
 - **Key 不明文落盘**：API Key 以 Fernet（AES-128-CBC + HMAC）加密，主密钥由 `APP_SECRET` 经 SHA-256 派生。主密钥在首次运行时落库到数据卷的 `settings` 表（容器创建时可用环境变量 `APP_SECRET` 指定；未指定则自动随机生成）。因此**保护边界从「仅环境变量」变为「整个数据卷」**：数据库与密钥同处 `data/` 目录，请对该目录统一做好访问控制与备份加密（已实测：库内无 `sk-` 明文字符串）。
 - **访问鉴权**：未登录访问任意 `/api/*` 返回 401，登录后下发 HttpOnly Cookie，默认 12 小时过期。
 - **明文按需取用**：列表页不渲染明文，点「复制」时才向服务端请求一次。
+- **AI 配置密钥同密**：「设置 → AI 模型说明配置」里的 API Key 与账号 Key 使用同一主密钥（Fernet）加密落盘，修改加密密钥时会一并重加密；同样实测库内无明文字符串。
 - **网络最小化**：仅服务端向各平台官方域名发 HTTPS 请求，无遥测、无外发。
 
 生产建议：
@@ -104,7 +121,7 @@ docker run -d --name llm-token-hub \
 
 ---
 
-## 五、接口一览
+## 六、接口一览
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -120,12 +137,20 @@ docker run -d --name llm-token-hub \
 | POST | `/api/refresh-all` | 刷新全部额度 |
 | GET | `/api/settings` | 设置状态（是否有 Key、密钥是否已托管） |
 | POST | `/api/settings/password` | 修改登录密码 |
-| POST | `/api/settings/secret` | 修改加密密钥并重加密全部 Key |
+| POST | `/api/settings/secret` | 修改加密密钥并重加密全部 Key 与 AI Key |
+| POST | `/api/accounts/{id}/models` | 调用该账号平台的 `/v1/models` 拉取模型列表 |
+| GET | `/api/models` | 模型库列表（含 AI 是否已配置） |
+| POST | `/api/models` | 新增模型（name / description / source） |
+| PUT | `/api/models/{id}` | 修改模型说明 |
+| DELETE | `/api/models/{id}` | 删除模型 |
+| POST | `/api/models/{id}/ai-describe` | 用已配置的 AI 接口为模型生成适用场景说明 |
+| GET | `/api/settings/ai` | AI 配置状态（返回地址/模型名，不含密钥） |
+| POST | `/api/settings/ai` | 保存 AI 接口配置（密钥加密存储） |
 | GET | `/healthz` | 健康检查（Docker HEALTHCHECK 使用） |
 
 ---
 
-## 六、本地开发
+## 七、本地开发
 
 ```bash
 pip install -r requirements.txt
@@ -133,16 +158,18 @@ ADMIN_PASSWORD=dev APP_SECRET=dev DB_PATH=./data/data.db \
   uvicorn app.main:app --reload --host 0.0.0.0 --port 8787
 ```
 
-## 七、路线图
+## 八、路线图
 
 - [x] 页面内修改登录密码与加密密钥（v1.1）
+- [x] 复制 API 地址 / 一键复制「地址+Key」配置片段（v1.2）
+- [x] 模型库：从平台 `/v1/models` 导入模型 + 适用场景说明（v1.2）
+- [x] AI 自动生成模型适用场景说明（v1.2）
 - [ ] 自定义平台支持手动填写余额接口路径
 - [ ] 额度变化历史与趋势图
 - [ ] 低余额提醒（Webhook / 邮件 / Bark）
-- [ ] 导出为环境变量 / JSON 配置片段，方便一键粘贴进其他工具
 - [ ] 硅基流动等开放平台尝试在线创建 Key（待平台能力确认）
 
-## 八、从 GHCR 拉取镜像（NAS 部署推荐）
+## 九、从 GHCR 拉取镜像（NAS 部署推荐）
 
 项目已接入 GitHub Actions：推送到 `main` 或打 `v*` tag 后，自动构建多架构镜像（amd64 / arm64）并发布到 GHCR。
 
@@ -161,6 +188,6 @@ cd /vol1/1000/docker/llm-token-hub && docker compose up -d
 bash deploy/publish-github.sh
 ```
 
-## 九、许可
+## 十、许可
 
 MIT License

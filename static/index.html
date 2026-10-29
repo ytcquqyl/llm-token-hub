@@ -14,14 +14,16 @@
   body{margin:0;background:var(--bg);color:var(--text);
        font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;}
   header{position:sticky;top:0;z-index:10;background:var(--bg);padding:14px 16px 8px;
-         border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}
-  header h1{font-size:17px;margin:0;flex:1}
+         border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  header h1{font-size:17px;margin:0;flex:1;min-width:120px}
   .btn{background:var(--primary);color:#fff;border:0;border-radius:8px;padding:8px 12px;font-size:14px}
   .btn.ghost{background:transparent;border:1px solid var(--line);color:var(--text)}
   .btn.sm{padding:6px 10px;font-size:13px}
   .btn.danger{background:var(--err)}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
   main{padding:12px 16px 90px}
   .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:12px}
+  .card2{background:var(--card2);border:1px solid var(--line);border-radius:8px;padding:10px 12px}
   .row{display:flex;align-items:center;gap:8px}
   .title{font-size:15px;font-weight:600}
   .sub{font-size:12px;color:var(--muted);margin-top:2px}
@@ -34,8 +36,9 @@
   .actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
   .toolbar{display:flex;gap:8px;margin-bottom:12px}
   #login{max-width:360px;margin:22vh auto;padding:20px}
-  input{width:100%;background:var(--card2);border:1px solid var(--line);color:var(--text);
-       border-radius:8px;padding:10px 12px;font-size:15px;margin-top:8px}
+  input,textarea{width:100%;background:var(--card2);border:1px solid var(--line);color:var(--text);
+       border-radius:8px;padding:10px 12px;font-size:15px;margin-top:8px;font-family:inherit}
+  textarea{resize:vertical;line-height:1.5}
   .select{position:relative;margin-top:8px}
   .select-trigger{display:flex;align-items:center;justify-content:space-between;
        background:var(--card2);border:1px solid var(--line);color:var(--text);
@@ -64,17 +67,28 @@
 
 <header id="appHeader" style="display:none">
   <h1>LLM Token 中枢</h1>
-  <button class="btn sm ghost" onclick="loadAll()">刷新</button>
+  <button class="btn sm" id="tabTokens" onclick="switchTab('tokens')">密钥</button>
+  <button class="btn sm ghost" id="tabModels" onclick="switchTab('models')">模型库</button>
   <button class="btn sm ghost" onclick="openSettings()">设置</button>
-  <button class="btn sm" onclick="openAdd()">+ 添加</button>
   <button class="btn sm ghost" onclick="logout()">退出</button>
 </header>
 
 <main id="app" style="display:none">
-  <div class="toolbar">
-    <button class="btn ghost" style="flex:1" onclick="refreshAll()">一键刷新全部额度</button>
+  <div id="tabTokensView">
+    <div class="toolbar">
+      <button class="btn ghost" style="flex:1" onclick="refreshAll()">一键刷新全部额度</button>
+      <button class="btn" onclick="openAdd()">+ 添加</button>
+    </div>
+    <div id="list"><div class="empty">加载中…</div></div>
   </div>
-  <div id="list"><div class="empty">加载中…</div></div>
+
+  <div id="tabModelsView" style="display:none">
+    <div class="toolbar">
+      <button class="btn ghost" style="flex:1" onclick="openImport()">从平台导入模型</button>
+      <button class="btn" onclick="openAddModel()">+ 添加</button>
+    </div>
+    <div id="modelList"><div class="empty">加载中…</div></div>
+  </div>
 </main>
 
 <div id="login" class="card">
@@ -113,6 +127,30 @@
   </div>
 </div>
 
+<div class="overlay" id="importSheet">
+  <div class="sheet">
+    <div class="row"><h3>从平台导入模型</h3><button class="btn sm ghost" onclick="closeImport()">关闭</button></div>
+    <label>选择账号（将调用该账号的 OpenAI 兼容 /v1/models 接口）</label>
+    <div id="importAccounts" style="display:flex;flex-direction:column;gap:8px;margin-top:8px"></div>
+    <div id="importResults" style="margin-top:12px"></div>
+  </div>
+</div>
+
+<div class="overlay" id="modelSheet">
+  <div class="sheet">
+    <div class="row"><h3 id="modelTitle">添加模型</h3><button class="btn sm ghost" onclick="closeModelSheet()">关闭</button></div>
+    <input type="hidden" id="modelEditId">
+    <label>模型名（如 deepseek-chat）</label>
+    <input id="modelName" placeholder="模型 ID">
+    <label>说明 / 适用场景（可留空，稍后用 AI 生成）</label>
+    <textarea id="modelDesc" placeholder="例如：擅长中文写作、代码生成、知识问答…"></textarea>
+    <div class="actions">
+      <button class="btn" onclick="saveModel()">保存</button>
+      <button class="btn ghost" onclick="closeModelSheet()">取消</button>
+    </div>
+  </div>
+</div>
+
 <div class="overlay" id="setSheet">
   <div class="sheet">
     <div class="row"><h3>设置</h3><button class="btn sm ghost" onclick="closeSet()">关闭</button></div>
@@ -139,7 +177,19 @@
       <label>确认新加密密钥</label>
       <input id="newSec2" type="password" autocomplete="off">
       <button class="btn" style="margin-top:10px" onclick="changeSecret()">保存加密密钥</button>
-      <div class="sub" style="margin-top:6px">将用新密钥重新加密库内全部 Key；Key 较多时耗时稍长，过程中请勿关闭服务。</div>
+      <div class="sub" style="margin-top:6px">将用新密钥重新加密库内全部 Key 与 AI 密钥；Key 较多时耗时稍长，过程中请勿关闭服务。</div>
+    </div>
+
+    <div class="card">
+      <div class="title">AI 模型说明配置</div>
+      <div class="sub">配置一个 OpenAI 兼容的对话接口，用于一键为模型生成「适用场景说明」。密钥以加密方式存储。</div>
+      <label>接口地址 Base URL（如 https://api.openai.com/v1）</label>
+      <input id="aiBase" placeholder="https://api.openai.com/v1">
+      <label>模型名（如 gpt-4o-mini）</label>
+      <input id="aiModel" placeholder="gpt-4o-mini">
+      <label>API Key（留空表示不修改）</label>
+      <input id="aiKey" type="password" autocomplete="off">
+      <button class="btn" style="margin-top:10px" onclick="saveAi()">保存 AI 配置</button>
     </div>
   </div>
 </div>
@@ -149,24 +199,39 @@
 <script>
 const $ = id => document.getElementById(id);
 let PLATFORMS = [];
+let ACCOUNTS = [];
+let MODELS = [];
+let currentTab = 'tokens';
+let lastModels = [];
 
 function toast(msg){ const t=$('toast'); t.textContent=msg; t.style.display='block';
   clearTimeout(window._tt); window._tt=setTimeout(()=>t.style.display='none',2200); }
 async function api(url,opt={}){ const r=await fetch(url,{...opt,headers:{'Content-Type':'application/json',...(opt.headers||{})}});
   if(r.status===401){ showLogin(); throw new Error('未登录'); } return r.json(); }
 function showLogin(){ $('login').style.display='block'; $('app').style.display='none'; $('appHeader').style.display='none'; }
-function showApp(){ $('login').style.display='none'; $('app').style.display='flex'; $('appHeader').style.display='flex'; $('app').style.flexDirection='column'; }
+function showApp(){ $('login').style.display='none'; $('app').style.display='block'; $('appHeader').style.display='flex'; }
 
 async function login(){ const pwd=$('pwd').value; if(!pwd){toast('请输入密码');return;}
   const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pwd})});
-  if(r.ok){ $('pwd').value=''; showApp(); loadAll(); } else { toast('密码错误'); } }
+  if(r.ok){ $('pwd').value=''; showApp(); await loadAll(); } else { toast('密码错误'); } }
 async function logout(){ await fetch('/api/logout',{method:'POST'}); showLogin(); }
+
+async function switchTab(t){
+  currentTab=t;
+  $('tabTokens').className = 'btn sm'+(t==='tokens'?'':' ghost');
+  $('tabModels').className = 'btn sm'+(t==='models'?'':' ghost');
+  $('tabTokensView').style.display = t==='tokens'?'block':'none';
+  $('tabModelsView').style.display = t==='models'?'block':'none';
+  if(t==='models') await renderModels();
+}
 
 async function openSettings(){
   const d=await api('/api/settings');
   $('secHint').textContent = d.has_accounts
     ? '当前库内已有 Key，保存后会对全部 Key 重新加密。'
     : '当前库内暂无 Key，可直接设置加密密钥。';
+  const ai=await api('/api/settings/ai');
+  $('aiBase').value=ai.base_url||''; $('aiModel').value=ai.model||''; $('aiKey').value='';
   $('setSheet').style.display='flex';
 }
 function closeSet(){ $('setSheet').style.display='none'; }
@@ -192,7 +257,7 @@ async function changeSecret(){
   if(!login||!n1){ toast('请填写完整'); return; }
   if(n1.length<8){ toast('加密密钥至少 8 位'); return; }
   if(n1!==n2){ toast('两次输入不一致'); return; }
-  if(!confirm('确认用新密钥重新加密库内全部 Key？')) return;
+  if(!confirm('确认用新密钥重新加密库内全部 Key 与 AI 密钥？')) return;
   toast('正在重新加密，请稍候…');
   const r=await fetch('/api/settings/secret',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({login_password:login,new_secret:n1})});
@@ -201,6 +266,16 @@ async function changeSecret(){
   toast('加密密钥已更新');
   ['secLogin','newSec','newSec2'].forEach(k=>$(k).value='');
   closeSet();
+}
+
+async function saveAi(){
+  const base=$('aiBase').value.trim(), model=$('aiModel').value.trim(), key=$('aiKey').value;
+  if(!base||!model){ toast('接口地址和模型名必填'); return; }
+  const r=await fetch('/api/settings/ai',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({base_url:base,model,key})});
+  const d=await r.json();
+  if(!r.ok){ toast(d.msg||'保存失败'); return; }
+  toast('AI 配置已保存'); $('aiKey').value='';
 }
 
 async function loadAll(){
@@ -231,9 +306,10 @@ document.addEventListener('click',e=>{ if($('platformSelect') && !$('platformSel
 
 async function render(){
   const d=await api('/api/accounts');
+  ACCOUNTS = d.items;
   const el=$('list');
-  if(!d.items.length){ el.innerHTML='<div class="empty">还没有 Key，点右上角「+ 添加」开始</div>'; return; }
-  el.innerHTML = d.items.map(a=>{
+  if(!ACCOUNTS.length){ el.innerHTML='<div class="empty">还没有 Key，点右上角「+ 添加」开始</div>'; return; }
+  el.innerHTML = ACCOUNTS.map(a=>{
     const st = a.balance_status;
     const dot = st==='ok'?'ok':(st==='error'||st==='invalid'?'err':(st==='unsupported'?'warn':''));
     const amount = a.balance!=null ? `<span class="amount">${a.balance_currency==='USD'?'$':'¥'}${a.balance}</span>`
@@ -251,6 +327,8 @@ async function render(){
       <div class="kv"><span>${st==='invalid'?'Key 失效':st==='error'?'查询失败':st==='unsupported'?'不支持查询':'正常'}</span></div>
       <div class="actions">
         <button class="btn sm" onclick="copyKey(${a.id})">复制 Key</button>
+        <button class="btn sm ghost" onclick="copyAddress(${a.id})">复制地址</button>
+        <button class="btn sm ghost" onclick="copyConfig(${a.id})">复制配置</button>
         <button class="btn sm ghost" onclick="refreshOne(${a.id})">刷新额度</button>
         <button class="btn sm ghost" onclick="editAccount(${a.id})">编辑</button>
         <button class="btn sm ghost" onclick="openConsole('${a.console}',${a.id})">去创建/管理 Key</button>
@@ -264,8 +342,23 @@ function escape(s){ return String(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':
 async function copyKey(id){
   const d=await api(`/api/accounts/${id}/key`);
   if(!d.ok){ toast(d.msg||'获取失败'); return; }
-  try{ await navigator.clipboard.writeText(d.api_key); toast('已复制到剪贴板'); }
+  try{ await navigator.clipboard.writeText(d.api_key); toast('已复制 Key'); }
   catch(e){ prompt('请手动复制：', d.api_key); }
+}
+async function copyAddress(id){
+  const a=ACCOUNTS.find(x=>x.id===id);
+  if(!a || !a.base_url){ toast('该账号无 API 地址'); return; }
+  try{ await navigator.clipboard.writeText(a.base_url); toast('已复制 API 地址'); }
+  catch(e){ prompt('请手动复制：', a.base_url); }
+}
+async function copyConfig(id){
+  const a=ACCOUNTS.find(x=>x.id===id);
+  if(!a){ toast('未找到记录'); return; }
+  const d=await api(`/api/accounts/${id}/key`);
+  if(!d.ok){ toast(d.msg||'获取失败'); return; }
+  const text = `base_url: ${a.base_url||'(平台默认)'}\napi_key: ${d.api_key}`;
+  try{ await navigator.clipboard.writeText(text); toast('已复制 地址+Key'); }
+  catch(e){ prompt('请手动复制：', text); }
 }
 
 async function refreshOne(id){ toast('查询中…'); const d=await api(`/api/accounts/${id}/refresh`,{method:'POST'});
@@ -305,6 +398,88 @@ async function delAccount(id){ if(!confirm('确认删除这条 Key 记录？')) 
   await api(`/api/accounts/${id}`,{method:'DELETE'}); toast('已删除'); await render(); }
 
 async function openConsole(url,id){ if(url){ window.open(url,'_blank'); toast('已打开官方控制台，创建新 Key 后回到这里添加'); } else toast('该平台无控制台链接'); }
+
+// ---------------- 模型库 ----------------
+async function renderModels(){
+  const d=await api('/api/models');
+  MODELS=d.items; const ai=d.ai_configured;
+  const el=$('modelList');
+  if(!MODELS.length){ el.innerHTML='<div class="empty">还没有模型，点「从平台导入模型」拉取或手动添加</div>'; return; }
+  el.innerHTML = MODELS.map(m=>`
+    <div class="card">
+      <div class="row">
+        <div style="flex:1">
+          <div class="title">${escape(m.name)}</div>
+          <div class="sub">来源：${m.source==='import'?'平台导入':m.source==='manual'?'手动添加':'添加'} · 更新于 ${new Date(m.updated_at*1000).toLocaleString('zh-CN')}</div>
+        </div>
+      </div>
+      <div class="card2" style="margin-top:8px;white-space:pre-wrap;font-size:13px;line-height:1.6;color:var(--text)">
+        ${m.description?escape(m.description):'<span style="color:var(--muted)">暂无说明，点「AI 生成说明」或「编辑说明」补充适用场景</span>'}
+      </div>
+      <div class="actions">
+        <button class="btn sm" onclick="copyModelName(${m.id})">复制模型名</button>
+        <button class="btn sm ghost" ${ai?'':'disabled title="请先在设置中配置 AI 接口"'} onclick="aiDescribe(${m.id})">AI 生成说明</button>
+        <button class="btn sm ghost" onclick="editModel(${m.id})">编辑说明</button>
+        <button class="btn sm danger" onclick="delModel(${m.id})">删除</button>
+      </div>
+    </div>`).join('');
+}
+
+async function openImport(){
+  const d=await api('/api/accounts');
+  const accs=d.items;
+  if(!accs.length){ toast('请先添加至少一个账号'); return; }
+  $('importAccounts').innerHTML = accs.map(a=>
+    `<button class="btn ghost" style="text-align:left" onclick="queryAccountModels(${a.id})">${escape(a.platform_display)}${a.label?' · '+escape(a.label):''}</button>`).join('');
+  $('importResults').innerHTML='';
+  $('importSheet').style.display='flex';
+}
+function closeImport(){ $('importSheet').style.display='none'; }
+
+async function queryAccountModels(id){
+  toast('查询模型中…');
+  const d=await api(`/api/accounts/${id}/models`,{method:'POST'});
+  if(!d.ok){ toast(d.msg||'查询失败'); return; }
+  lastModels=d.items;
+  if(!d.items.length){ $('importResults').innerHTML='<div class="sub">该接口未返回模型列表（可能不支持 /v1/models）。</div>'; return; }
+  $('importResults').innerHTML = `<div class="sub">共 ${d.count} 个模型（来自 ${escape(d.url)}）</div>
+    <div style="margin-top:8px">${d.items.map((m,i)=>`<div class="row" style="margin-top:6px"><input type="checkbox" id="imp_${i}" checked> <label style="flex:1;color:var(--text);font-size:13px">${escape(m)}</label></div>`).join('')}</div>
+    <button class="btn" style="margin-top:12px" onclick="importSelected()">导入选中模型</button>`;
+}
+async function importSelected(){
+  const names=lastModels.filter((_,i)=>$(`imp_${i}`)?.checked);
+  if(!names.length){ toast('请至少勾选一个'); return; }
+  for(const n of names){ await api('/api/models',{method:'POST',body:JSON.stringify({name:n,source:'import'})}); }
+  toast(`已导入 ${names.length} 个模型`);
+  $('importResults').innerHTML='';
+  await renderModels();
+}
+
+function openAddModel(){ $('modelEditId').value=''; $('modelTitle').textContent='添加模型';
+  $('modelName').value=''; $('modelName').disabled=false; $('modelDesc').value=''; $('modelSheet').style.display='flex'; }
+function closeModelSheet(){ $('modelSheet').style.display='none'; }
+async function editModel(id){ const m=MODELS.find(x=>x.id===id);
+  $('modelEditId').value=id; $('modelTitle').textContent='编辑说明';
+  $('modelName').value=m.name; $('modelName').disabled=true; $('modelDesc').value=m.description;
+  $('modelSheet').style.display='flex'; }
+async function saveModel(){
+  const id=$('modelEditId').value; const name=$('modelName').value.trim(); const desc=$('modelDesc').value;
+  if(!name){ toast('请填写模型名'); return; }
+  if(id){ await api(`/api/models/${id}`,{method:'PUT',body:JSON.stringify({description:desc})}); }
+  else { const r=await api('/api/models',{method:'POST',body:JSON.stringify({name,description:desc,source:'manual'})}); if(!r.ok){toast('保存失败');return;} }
+  closeModelSheet(); toast('已保存'); await renderModels();
+}
+async function delModel(id){ if(!confirm('确认删除该模型？')) return;
+  await api(`/api/models/${id}`,{method:'DELETE'}); toast('已删除'); await renderModels(); }
+async function copyModelName(id){ const m=MODELS.find(x=>x.id===id);
+  try{ await navigator.clipboard.writeText(m.name); toast('已复制模型名'); }
+  catch(e){ prompt('请手动复制：',m.name); } }
+async function aiDescribe(id){
+  toast('AI 生成中，请稍候…');
+  const d=await api(`/api/models/${id}/ai-describe`,{method:'POST'});
+  if(!d.ok){ toast(d.msg||'生成失败'); return; }
+  toast('已生成适用场景说明'); await renderModels();
+}
 
 // 启动
 fetch('/api/platforms').then(r=>{ if(r.status===401){showLogin(); return null;} return r.json(); })

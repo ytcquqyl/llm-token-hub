@@ -6,6 +6,9 @@ LLM Token Hub —— 多平台大模型 API Token 管理中枢（网页版 / 容
 · 登录密码与加密密钥均支持在页面内修改并持久化（默认仅容器创建时通过环境变量设定）
 · 修改加密密钥会原子地用新密钥重新加密库内全部 Key
 · 服务端代理查询各平台余额，前端无跨域问题
+· 模型库：从平台 OpenAI 兼容 /v1/models 拉取模型，可为每个模型记录适用场景说明
+· AI 说明：配置一个 OpenAI 兼容接口后，一键让 AI 为模型生成适用场景说明
+· 复制增强：可单独复制 API 地址，或一键复制「地址 + Key」配置
 · 访问控制：密码登录后下发 HttpOnly Cookie 会话
 """
 import base64
@@ -108,6 +111,13 @@ def db() -> sqlite3.Connection:
     conn.execute("""CREATE TABLE IF NOT EXISTS settings(
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS models(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        description TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL)""")
     conn.commit()
     return conn
 
@@ -139,6 +149,37 @@ def hash_pw(pw: str) -> str:
     return hashlib.sha256(pw.encode()).hexdigest()
 
 
+# ---------------- AI 说明配置（key 同样用主密钥加密） ----------------
+def get_ai_config() -> dict:
+    conn = db()
+    try:
+        rows = conn.execute(
+            "SELECT key,value FROM settings WHERE key IN ('ai_base_url','ai_model','ai_key_encrypted')"
+        ).fetchall()
+    finally:
+        conn.close()
+    return {r["key"]: r["value"] for r in rows}
+
+
+def set_ai_config(base_url: str, model: str, key: str):
+    """key 为空时保留原有密钥（用于仅更新地址/模型名）。"""
+    conn = db()
+    try:
+        conn.execute(
+            "INSERT INTO settings(key,value) VALUES('ai_base_url',?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (base_url,))
+        conn.execute(
+            "INSERT INTO settings(key,value) VALUES('ai_model',?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (model,))
+        if key:
+            conn.execute(
+                "INSERT INTO settings(key,value) VALUES('ai_key_encrypted',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (encrypt_key(key),))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def rebuild_fernet(secret: str):
     global fernet
     fernet = Fernet(base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest()))
@@ -162,7 +203,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="LLM Token Hub", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="LLM Token Hub", version="1.2.0", lifespan=lifespan)
 
 
 # ---------------- 会话 ----------------
@@ -452,6 +493,15 @@ def reencrypt_all(new_secret: str):
             updates.append((new_fernet.encrypt(plain.encode()).decode(), r["id"]))
         for enc, rid in updates:
             conn.execute("UPDATE accounts SET key_encrypted=? WHERE id=?", (enc, rid))
+        # 同时重加密 AI 密钥
+        ai_row = conn.execute("SELECT value FROM settings WHERE key='ai_key_encrypted'").fetchone()
+        if ai_row:
+            try:
+                ai_plain = old_fernet.decrypt(ai_row["value"].encode()).decode()
+            except InvalidToken:
+                raise ValueError("AI 密钥解密失败，已中止（未改动任何数据）")
+            conn.execute("UPDATE settings SET value=? WHERE key='ai_key_encrypted'",
+                         (new_fernet.encrypt(ai_plain.encode()).decode(),))
         conn.execute(
             "INSERT INTO settings(key,value) VALUES(?,?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -495,6 +545,176 @@ async def query_balance(r: sqlite3.Row) -> dict:
         return {"ok": False, "balance": None, "currency": b.get("currency", ""), "status": "error",
                 "msg": f"网络错误或超时：{type(e).__name__}"}
     return {"ok": True, "balance": value, "currency": b["currency"], "status": "ok", "msg": "ok"}
+
+
+# ---------------- 模型库 + AI 说明 ----------------
+@app.post("/api/accounts/{account_id}/models")
+async def query_account_models(account_id: int, _: str = Depends(require_session)):
+    """调用账号所属平台的 OpenAI 兼容 /v1/models 接口，返回模型 ID 列表。"""
+    conn = db()
+    try:
+        r = conn.execute("SELECT * FROM accounts WHERE id=?", (account_id,)).fetchone()
+    finally:
+        conn.close()
+    if r is None:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    try:
+        plain = decrypt_key(r["key_encrypted"])
+    except InvalidToken:
+        return JSONResponse({"ok": False, "msg": "解密失败，请重新录入 Key"}, status_code=400)
+    cfg = PLATFORMS.get(r["platform"])
+    base = (r["base_url"] or (cfg["base_url"] if cfg else "")).rstrip("/")
+    if base.endswith("/v1"):
+        base = base[:-3]
+    url = base + "/v1/models"
+    headers = {"Authorization": "Bearer " + plain, "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            resp = await client.get(url, headers=headers)
+        if resp.status_code in (401, 403):
+            return JSONResponse({"ok": False, "msg": "Key 无效或权限不足"}, status_code=400)
+        if resp.status_code >= 400:
+            return JSONResponse({"ok": False, "msg": f"HTTP {resp.status_code}"}, status_code=400)
+        data = resp.json()
+        items = [m.get("id") for m in data.get("data", []) if m.get("id")]
+        return {"ok": True, "url": url, "items": items, "count": len(items)}
+    except Exception as e:
+        return JSONResponse({"ok": False, "msg": f"网络错误或超时：{type(e).__name__}"}, status_code=400)
+
+
+@app.get("/api/models")
+async def list_models(_: str = Depends(require_session)):
+    conn = db()
+    try:
+        rows = conn.execute("SELECT * FROM models ORDER BY id DESC").fetchall()
+    finally:
+        conn.close()
+    cfg = get_ai_config()
+    return {"items": [dict(r) for r in rows],
+            "ai_configured": bool(cfg.get("ai_base_url") and cfg.get("ai_key_encrypted"))}
+
+
+@app.post("/api/models")
+async def add_model(request: Request, _: str = Depends(require_session)):
+    body = await request.json()
+    name = str(body.get("name", "")).strip()
+    if not name:
+        return JSONResponse({"ok": False, "msg": "模型名不能为空"}, status_code=400)
+    conn = db()
+    try:
+        cur = conn.execute("SELECT id FROM models WHERE name=?", (name,)).fetchone()
+        if cur:
+            conn.execute("UPDATE models SET description=?,source=?,updated_at=? WHERE id=?",
+                         (str(body.get("description", "")), str(body.get("source", "manual")),
+                          int(time.time()), cur["id"]))
+            mid = cur["id"]
+        else:
+            cur = conn.execute(
+                "INSERT INTO models(name,description,source,created_at,updated_at) VALUES(?,?,?,?,?)",
+                (name, str(body.get("description", "")), str(body.get("source", "manual")),
+                 int(time.time()), int(time.time())))
+            mid = cur.lastrowid
+        conn.commit()
+        row = conn.execute("SELECT * FROM models WHERE id=?", (mid,)).fetchone()
+    finally:
+        conn.close()
+    return {"ok": True, "model": dict(row)}
+
+
+@app.put("/api/models/{model_id}")
+async def update_model(model_id: int, request: Request, _: str = Depends(require_session)):
+    body = await request.json()
+    conn = db()
+    try:
+        r = conn.execute("SELECT * FROM models WHERE id=?", (model_id,)).fetchone()
+        if r is None:
+            raise HTTPException(status_code=404, detail="模型不存在")
+        conn.execute("UPDATE models SET description=?,updated_at=? WHERE id=?",
+                     (str(body.get("description", r["description"])), int(time.time()), model_id))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True}
+
+
+@app.delete("/api/models/{model_id}")
+async def delete_model(model_id: int, _: str = Depends(require_session)):
+    conn = db()
+    try:
+        conn.execute("DELETE FROM models WHERE id=?", (model_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True}
+
+
+@app.post("/api/models/{model_id}/ai-describe")
+async def ai_describe(model_id: int, _: str = Depends(require_session)):
+    """用已配置的 OpenAI 兼容接口，为指定模型生成适用场景说明。"""
+    cfg = get_ai_config()
+    if not cfg.get("ai_base_url") or not cfg.get("ai_key_encrypted"):
+        return JSONResponse({"ok": False, "msg": "请先在设置中配置 AI 接口与密钥"}, status_code=400)
+    try:
+        ai_key = decrypt_key(cfg["ai_key_encrypted"])
+    except InvalidToken:
+        return JSONResponse({"ok": False, "msg": "AI 密钥解密失败，请重新配置"}, status_code=400)
+    conn = db()
+    try:
+        r = conn.execute("SELECT * FROM models WHERE id=?", (model_id,)).fetchone()
+    finally:
+        conn.close()
+    if r is None:
+        raise HTTPException(status_code=404, detail="模型不存在")
+    prompt = (f"你是一名大模型选型顾问。请简要说明模型「{r['name']}」的主要能力特点，"
+              f"并列出它最适用的 3-5 个使用场景。用简体中文、分点回答，总字数控制在 160 字以内，"
+              f"不要使用代码块或 Markdown 标题，直接给出文字。")
+    base = cfg["ai_base_url"].rstrip("/")
+    if base.endswith("/v1"):
+        base = base[:-3]
+    url = base + "/v1/chat/completions"
+    headers = {"Authorization": "Bearer " + ai_key, "Content-Type": "application/json"}
+    payload = {"model": cfg["ai_model"] or "gpt-4o-mini",
+               "messages": [{"role": "user", "content": prompt}],
+               "temperature": 0.6, "max_tokens": 400}
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+        if resp.status_code >= 400:
+            return JSONResponse({"ok": False, "msg": f"AI 接口返回 HTTP {resp.status_code}"}, status_code=400)
+        data = resp.json()
+        text = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        if not text:
+            return JSONResponse({"ok": False, "msg": "AI 返回内容为空"}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"ok": False, "msg": f"调用 AI 失败：{type(e).__name__}"}, status_code=400)
+    conn = db()
+    try:
+        conn.execute("UPDATE models SET description=?,updated_at=? WHERE id=?",
+                     (text, int(time.time()), model_id))
+        conn.commit()
+        row = conn.execute("SELECT * FROM models WHERE id=?", (model_id,)).fetchone()
+    finally:
+        conn.close()
+    return {"ok": True, "description": text, "model": dict(row)}
+
+
+@app.get("/api/settings/ai")
+async def get_ai(_: str = Depends(require_session)):
+    cfg = get_ai_config()
+    return {"configured": bool(cfg.get("ai_base_url") and cfg.get("ai_key_encrypted")),
+            "base_url": cfg.get("ai_base_url", ""), "model": cfg.get("ai_model", "")}
+
+
+@app.post("/api/settings/ai")
+async def save_ai(request: Request, _: str = Depends(require_session)):
+    body = await request.json()
+    base_url = str(body.get("base_url", "")).strip()
+    model = str(body.get("model", "")).strip()
+    key = str(body.get("key", "")).strip()
+    if not base_url or not model:
+        return JSONResponse({"ok": False, "msg": "接口地址与模型名必填"}, status_code=400)
+    set_ai_config(base_url, model, key)  # key 为空则保留原值
+    return {"ok": True}
 
 
 # ---------------- 静态页面 ----------------
