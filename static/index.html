@@ -87,6 +87,11 @@
       <button class="btn ghost" style="flex:1" onclick="openImport()">从平台导入模型</button>
       <button class="btn" onclick="openAddModel()">+ 添加</button>
     </div>
+    <div class="toolbar">
+      <input id="modelSearch" placeholder="搜索模型名 / 说明 / 来源平台" style="flex:1;margin-top:0"
+             oninput="renderModels()" onkeydown="if(event.key==='Enter')renderModels()">
+      <button class="btn" onclick="renderModels()">搜索</button>
+    </div>
     <div id="modelList"><div class="empty">加载中…</div></div>
   </div>
 </main>
@@ -204,6 +209,7 @@ let MODELS = [];
 let currentTab = 'tokens';
 let lastModels = [];
 let lastSource = '';
+let lastPlatform = '';
 
 function toast(msg){ const t=$('toast'); t.textContent=msg; t.style.display='block';
   clearTimeout(window._tt); window._tt=setTimeout(()=>t.style.display='none',2200); }
@@ -420,16 +426,31 @@ async function delAccount(id){ if(!confirm('确认删除这条 Key 记录？')) 
 async function openConsole(url,id){ if(url){ window.open(url,'_blank'); toast('已打开官方控制台，创建新 Key 后回到这里添加'); } else toast('该平台无控制台链接'); }
 
 // ---------------- 模型库 ----------------
+function platformBadge(m){
+  // 来源平台徽章：导入的显示平台名，手动的显示「手动」，旧数据无平台则不显示
+  if(m.platform){
+    const p=PLATFORMS.find(x=>x.name===m.platform);
+    const label=p?p.display:m.platform;
+    return `<span class="badge" style="color:var(--primary);border-color:var(--primary);margin-left:8px">${escape(label)}</span>`;
+  }
+  if(m.source==='manual') return `<span class="badge" style="margin-left:8px">手动</span>`;
+  return '';
+}
 async function renderModels(){
   const d=await api('/api/models');
   MODELS=d.items; const ai=d.ai_configured;
+  const kw=($('modelSearch')?.value||'').trim().toLowerCase();
+  const shown = kw
+    ? MODELS.filter(m=>(m.name+'\n'+(m.description||'')+'\n'+(m.source_label||'')+'\n'+(m.platform||'')).toLowerCase().includes(kw))
+    : MODELS;
   const el=$('modelList');
   if(!MODELS.length){ el.innerHTML='<div class="empty">还没有模型，点「从平台导入模型」拉取或手动添加</div>'; return; }
-  el.innerHTML = MODELS.map(m=>`
+  if(!shown.length){ el.innerHTML=`<div class="empty">没有匹配「${escape(kw)}」的模型（共 ${MODELS.length} 个）</div>`; return; }
+  el.innerHTML = `<div class="sub" style="margin:0 0 8px">${kw?`匹配 ${shown.length} / `:''}共 ${MODELS.length} 个模型</div>` + shown.map(m=>`
     <div class="card">
       <div class="row">
         <div style="flex:1">
-          <div class="title">${escape(m.name)}</div>
+          <div class="title" style="display:flex;align-items:center;flex-wrap:wrap">${escape(m.name)}${platformBadge(m)}</div>
           <div class="sub">来源：${m.source_label?`来自 ${escape(m.source_label)}`:(m.source==='manual'?'手动添加':'平台导入')} · 更新于 ${new Date(m.updated_at*1000).toLocaleString('zh-CN')}</div>
         </div>
       </div>
@@ -460,19 +481,22 @@ async function queryAccountModels(id){
   toast('查询模型中…');
   const acc=ACCOUNTS.find(x=>x.id===id);
   lastSource=acc ? ((acc.platform_display||'')+(acc.label?' · '+acc.label:'')) : '';
+  lastPlatform=acc ? (acc.platform||'') : '';
   const d=await api(`/api/accounts/${id}/models`,{method:'POST'});
   if(!d.ok){ toast(d.msg||'查询失败'); return; }
   lastModels=d.items;
   if(!d.items.length){ $('importResults').innerHTML='<div class="sub">该接口未返回模型列表（可能不支持 /v1/models）。</div>'; return; }
-  $('importResults').innerHTML = `<div class="sub">共 ${d.count} 个模型（来自 ${escape(d.url)}）</div>
+  $('importResults').innerHTML = `<div class="sub">共 ${d.count} 个模型 · 来自 <b style="color:var(--text)">${escape(lastSource||d.platform_display||'所选账号')}</b>（${escape(d.url)}）</div>
     <div style="margin-top:8px">${d.items.map((m,i)=>`<div class="row" style="margin-top:6px"><input type="checkbox" id="imp_${i}" checked> <label style="flex:1;color:var(--text);font-size:13px">${escape(m)}</label></div>`).join('')}</div>
     <button class="btn" style="margin-top:12px" onclick="importSelected()">导入选中模型</button>`;
 }
 async function importSelected(){
   const names=lastModels.filter((_,i)=>$(`imp_${i}`)?.checked);
   if(!names.length){ toast('请至少勾选一个'); return; }
-  for(const n of names){ await api('/api/models',{method:'POST',body:JSON.stringify({name:n,source:'import',source_label:lastSource||''})}); }
-  toast(`已导入 ${names.length} 个模型`);
+  for(const n of names){
+    await api('/api/models',{method:'POST',body:JSON.stringify({name:n,source:'import',source_label:lastSource||'',platform:lastPlatform||''})});
+  }
+  toast(`已导入 ${names.length} 个模型（来源：${lastSource||'所选账号'}）`);
   $('importResults').innerHTML='';
   await renderModels();
 }

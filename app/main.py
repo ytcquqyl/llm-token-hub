@@ -117,10 +117,15 @@ def db() -> sqlite3.Connection:
         description TEXT NOT NULL DEFAULT '',
         source TEXT NOT NULL DEFAULT '',
         source_label TEXT NOT NULL DEFAULT '',
+        platform TEXT NOT NULL DEFAULT '',
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL)""")
     try:  # v1.2.1 迁移：为旧库补充来源标注列
         conn.execute("ALTER TABLE models ADD COLUMN source_label TEXT NOT NULL DEFAULT ''")
+    except Exception:
+        pass
+    try:  # v1.3.0 迁移：为旧库补充来源平台列
+        conn.execute("ALTER TABLE models ADD COLUMN platform TEXT NOT NULL DEFAULT ''")
     except Exception:
         pass
     conn.commit()
@@ -208,7 +213,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="LLM Token Hub", version="1.2.1", lifespan=lifespan)
+app = FastAPI(title="LLM Token Hub", version="1.3.0", lifespan=lifespan)
 
 
 # ---------------- 会话 ----------------
@@ -609,18 +614,19 @@ async def add_model(request: Request, _: str = Depends(require_session)):
         return JSONResponse({"ok": False, "msg": "模型名不能为空"}, status_code=400)
     conn = db()
     try:
+        platform = str(body.get("platform", "")).strip()
         cur = conn.execute("SELECT id FROM models WHERE name=?", (name,)).fetchone()
         if cur:
             conn.execute(
-                "UPDATE models SET description=?,source=?,source_label=?,updated_at=? WHERE id=?",
+                "UPDATE models SET description=?,source=?,source_label=?,platform=?,updated_at=? WHERE id=?",
                 (str(body.get("description", "")), str(body.get("source", "manual")),
-                 str(body.get("source_label", "")), int(time.time()), cur["id"]))
+                 str(body.get("source_label", "")), platform, int(time.time()), cur["id"]))
             mid = cur["id"]
         else:
             cur = conn.execute(
-                "INSERT INTO models(name,description,source,source_label,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                "INSERT INTO models(name,description,source,source_label,platform,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
                 (name, str(body.get("description", "")), str(body.get("source", "manual")),
-                 str(body.get("source_label", "")), int(time.time()), int(time.time())))
+                 str(body.get("source_label", "")), platform, int(time.time()), int(time.time())))
             mid = cur.lastrowid
         conn.commit()
         row = conn.execute("SELECT * FROM models WHERE id=?", (mid,)).fetchone()
