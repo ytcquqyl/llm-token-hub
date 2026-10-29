@@ -34,8 +34,20 @@
   .actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
   .toolbar{display:flex;gap:8px;margin-bottom:12px}
   #login{max-width:360px;margin:22vh auto;padding:20px}
-  input,select{width:100%;background:var(--card2);border:1px solid var(--line);color:var(--text);
+  input{width:100%;background:var(--card2);border:1px solid var(--line);color:var(--text);
        border-radius:8px;padding:10px 12px;font-size:15px;margin-top:8px}
+  .select{position:relative;margin-top:8px}
+  .select-trigger{display:flex;align-items:center;justify-content:space-between;
+       background:var(--card2);border:1px solid var(--line);color:var(--text);
+       border-radius:8px;padding:10px 12px;font-size:15px;cursor:pointer}
+  .select-trigger .caret{color:var(--muted);font-size:12px;margin-left:8px}
+  .select-menu{position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:60;margin:0;
+       background:var(--card);border:1px solid var(--line);border-radius:8px;
+       max-height:240px;overflow:auto;padding:4px;box-shadow:0 12px 32px rgba(0,0,0,.55);display:none}
+  .select-menu.open{display:block}
+  .select-item{padding:10px 12px;border-radius:6px;font-size:14px;cursor:pointer;list-style:none}
+  .select-item:hover{background:var(--card2)}
+  .select-item .sub{font-size:11px;color:var(--muted);margin-top:2px}
   label{font-size:13px;color:var(--muted)}
   .overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:flex-end;z-index:20}
   .sheet{background:var(--card);border-top-left-radius:16px;border-top-right-radius:16px;
@@ -78,7 +90,13 @@
     <div class="row"><h3 id="sheetTitle">添加 Key</h3></div>
     <input type="hidden" id="editId">
     <label>平台</label>
-    <select id="platform" onchange="onPlatformChange()"></select>
+    <div class="select" id="platformSelect">
+      <div class="select-trigger" id="platformTrigger" onclick="togglePlatform()">
+        <span id="platformLabel">请选择平台</span><span class="caret">▾</span>
+      </div>
+      <ul class="select-menu" id="platformMenu"></ul>
+    </div>
+    <input type="hidden" id="platform" value="">
     <label>备注名称</label>
     <input id="label" placeholder="例如：主力账号 / 测试账号">
     <label>API Key</label>
@@ -187,10 +205,29 @@ async function changeSecret(){
 
 async function loadAll(){
   const p=await api('/api/platforms'); PLATFORMS=p.items;
-  const sel=$('platform'); sel.innerHTML = PLATFORMS.map(x=>`<option value="${x.name}">${x.display}${x.support_balance?'（可查额度）':'（仅托管）'}</option>`).join('')
-    + '<option value="custom">自定义平台（仅托管 Key）</option>';
+  buildPlatformMenu();
   await render();
 }
+
+function buildPlatformMenu(){
+  const base = PLATFORMS.map(x=>({name:x.name,
+    label:x.display+(x.support_balance?'（可查额度）':'（仅托管）'),
+    sub:(x.models||[]).join('、')}));
+  base.push({name:'custom', label:'自定义平台（仅托管 Key）', sub:'仅做 Key 托管与复制，不查询额度'});
+  $('platformMenu').innerHTML = base.map(it=>
+    `<li class="select-item" data-name="${it.name}" onclick="selectPlatform('${it.name}')">`
+    + `<div>${it.label}</div><div class="sub">${it.sub||''}</div></li>`).join('');
+}
+
+function setPlatformValue(name){
+  $('platform').value=name;
+  const li=$('platformMenu').querySelector(`[data-name="${name}"]`);
+  $('platformLabel').textContent = li ? li.querySelector('div').textContent : (name==='custom'?'自定义平台':'请选择平台');
+}
+function togglePlatform(){ $('platformMenu').classList.toggle('open'); }
+function closePlatformMenu(){ $('platformMenu').classList.remove('open'); }
+function selectPlatform(name){ setPlatformValue(name); closePlatformMenu(); onPlatformChange(); }
+document.addEventListener('click',e=>{ if($('platformSelect') && !$('platformSelect').contains(e.target)) closePlatformMenu(); });
 
 async function render(){
   const d=await api('/api/accounts');
@@ -238,10 +275,13 @@ async function refreshAll(){ toast('正在刷新全部额度…'); const d=await
   toast(`完成：成功 ${d.ok_count} 个${d.failed&&d.failed.length?'，失败 '+d.failed.length+' 个':''}`); await render(); }
 
 function openAdd(){ $('editId').value=''; $('sheetTitle').textContent='添加 Key';
-  ['apiKey','label','baseUrl','remark'].forEach(k=>$(k).value=''); onPlatformChange(); $('sheet').style.display='flex'; }
+  ['apiKey','label','baseUrl','remark'].forEach(k=>$(k).value='');
+  if(PLATFORMS.length) selectPlatform(PLATFORMS[0].name);
+  else { $('platform').value=''; $('platformLabel').textContent='请选择平台'; }
+  $('sheet').style.display='flex'; }
 function closeSheet(){ $('sheet').style.display='none'; }
 async function editAccount(id){ const d=await api('/api/accounts'); const a=d.items.find(x=>x.id===id);
-  $('editId').value=id; $('sheetTitle').textContent='编辑 Key'; $('platform').value=a.platform;
+  $('editId').value=id; $('sheetTitle').textContent='编辑 Key'; setPlatformValue(a.platform);
   $('label').value=a.label; $('baseUrl').value=a.base_url; $('remark').value=a.remark; $('apiKey').value='';
   $('apiKey').placeholder='留空表示不修改'; onPlatformChange(); $('sheet').style.display='flex'; }
 
