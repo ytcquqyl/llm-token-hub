@@ -66,7 +66,8 @@
 <body>
 
 <header id="appHeader" style="display:none">
-  <h1>LLM Token 中枢</h1>
+  <h1 style="display:flex;align-items:center;gap:6px">LLM Token 中枢
+    <span class="badge" id="verBadge" style="font-weight:400;color:var(--muted)"></span></h1>
   <button class="btn sm" id="tabTokens" onclick="switchTab('tokens')">密钥</button>
   <button class="btn sm ghost" id="tabModels" onclick="switchTab('models')">模型库</button>
   <button class="btn sm ghost" onclick="openSettings()">设置</button>
@@ -91,6 +92,10 @@
       <input id="modelSearch" placeholder="搜索模型名 / 说明 / 来源平台" style="flex:1;margin-top:0"
              oninput="renderModels()" onkeydown="if(event.key==='Enter')renderModels()">
       <button class="btn" onclick="renderModels()">搜索</button>
+    </div>
+    <div class="toolbar">
+      <button class="btn sm ghost" id="backfillBtn" style="flex:1" onclick="backfillPlatform()">识别旧模型来源</button>
+      <button class="btn sm ghost" id="aiBatchBtn" style="flex:1" onclick="aiDescribeBatch()">AI 补全说明</button>
     </div>
     <div id="modelList"><div class="empty">加载中…</div></div>
   </div>
@@ -439,6 +444,12 @@ function platformBadge(m){
 async function renderModels(){
   const d=await api('/api/models');
   MODELS=d.items; const ai=d.ai_configured;
+  // 更新工具按钮状态
+  const missing=MODELS.filter(m=>!m.description).length;
+  const bb=$('aiBatchBtn');
+  if(bb){ bb.textContent = missing?`AI 补全说明（缺 ${missing}）`:'AI 补全说明 ✓';
+    bb.disabled = !ai || !missing;
+    bb.title = !ai ? '请先在设置中配置 AI 接口' : (missing?`为 ${missing} 个无说明模型批量生成`:'全部已有说明'); }
   const kw=($('modelSearch')?.value||'').trim().toLowerCase();
   const shown = kw
     ? MODELS.filter(m=>(m.name+'\n'+(m.description||'')+'\n'+(m.source_label||'')+'\n'+(m.platform||'')).toLowerCase().includes(kw))
@@ -451,7 +462,7 @@ async function renderModels(){
       <div class="row">
         <div style="flex:1">
           <div class="title" style="display:flex;align-items:center;flex-wrap:wrap">${escape(m.name)}${platformBadge(m)}</div>
-          <div class="sub">来源：${m.source_label?`来自 ${escape(m.source_label)}`:(m.source==='manual'?'手动添加':'平台导入')} · 更新于 ${new Date(m.updated_at*1000).toLocaleString('zh-CN')}</div>
+          <div class="sub">来源：${m.source_label?`来自 ${escape(m.source_label)}`:(m.source==='manual'?'手动添加':(m.platform?'平台导入':'平台导入（未识别）'))} · 更新于 ${new Date(m.updated_at*1000).toLocaleString('zh-CN')}</div>
         </div>
       </div>
       <div class="card2" style="margin-top:8px;white-space:pre-wrap;font-size:13px;line-height:1.6;color:var(--text)">
@@ -494,10 +505,45 @@ async function importSelected(){
   const names=lastModels.filter((_,i)=>$(`imp_${i}`)?.checked);
   if(!names.length){ toast('请至少勾选一个'); return; }
   for(const n of names){
+    // 不传 description：后端保留已有说明，不会清空 AI 生成的内容
     await api('/api/models',{method:'POST',body:JSON.stringify({name:n,source:'import',source_label:lastSource||'',platform:lastPlatform||''})});
   }
-  toast(`已导入 ${names.length} 个模型（来源：${lastSource||'所选账号'}）`);
   $('importResults').innerHTML='';
+  closeImport();
+  toast(`已导入 ${names.length} 个模型（来源：${lastSource||'所选账号'}）`);
+  await renderModels();
+  // 导入完成后，自动询问是否批量生成缺失说明
+  const missing=MODELS.filter(m=>!m.description).length;
+  if(missing && confirm(`已导入完成。检测到 ${missing} 个模型还没有说明，是否立即批量调用 AI 生成？\n（依模型数量耗时，期间请保持页面打开）`)) await aiDescribeBatch();
+}
+
+async function backfillPlatform(){
+  toast('正在拉取各账号模型列表并匹配…');
+  const btn=$('backfillBtn'); btn.disabled=true;
+  try{
+    const d=await api('/api/models/backfill-platform',{method:'POST'});
+    if(!d.ok){ toast(d.msg||'回填失败'); return; }
+    let msg=`回填完成：更新 ${d.updated} 个模型的来源`;
+    if(d.still_missing) msg+=`，仍有 ${d.still_missing} 个无法识别`; 
+    if(d.failed&&d.failed.length) msg+=`；失败账号：${d.failed.join('、')}`;
+    toast(msg);
+    await renderModels();
+  } finally { btn.disabled=false; }
+}
+
+async function aiDescribeBatch(){
+  const targets=MODELS.filter(m=>!m.description);
+  if(!targets.length){ toast('所有模型都已有说明'); return; }
+  if(!confirm(`将为 ${targets.length} 个模型逐个生成 AI 说明，耗时较久，期间请保持页面打开。继续？`)) return;
+  let ok=0, fail=0;
+  for(let i=0;i<targets.length;i++){
+    toast(`AI 生成说明 ${i+1}/${targets.length}…`);
+    try{
+      const d=await api(`/api/models/${targets[i].id}/ai-describe`,{method:'POST'});
+      d.ok?ok++:(fail++, console.warn(targets[i].name, d.msg));
+    }catch(e){ fail++; }
+  }
+  toast(`批量生成完成：成功 ${ok}${fail?`，失败 ${fail}`:''}`);
   await renderModels();
 }
 
@@ -527,6 +573,7 @@ async function aiDescribe(id){
 }
 
 // 启动
+fetch('/healthz').then(r=>r.json()).then(d=>{ const b=$('verBadge'); if(b&&d.version) b.textContent='v'+d.version; }).catch(()=>{});
 fetch('/api/platforms').then(r=>{ if(r.status===401){showLogin(); return null;} return r.json(); })
   .then(d=>{ if(d){ showApp(); loadAll(); } });
 </script>

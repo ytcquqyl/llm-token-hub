@@ -213,7 +213,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="LLM Token Hub", version="1.3.0", lifespan=lifespan)
+app = FastAPI(title="LLM Token Hub", version="1.4.0", lifespan=lifespan)
 
 
 # ---------------- 会话 ----------------
@@ -615,17 +615,24 @@ async def add_model(request: Request, _: str = Depends(require_session)):
     conn = db()
     try:
         platform = str(body.get("platform", "")).strip()
-        cur = conn.execute("SELECT id FROM models WHERE name=?", (name,)).fetchone()
+        # description 仅在请求里显式给出时才覆盖；平台导入不传该字段，避免清空已生成的 AI 说明
+        desc_given = "description" in body
+        desc = str(body.get("description", "")) if desc_given else None
+        cur = conn.execute("SELECT * FROM models WHERE name=?", (name,)).fetchone()
         if cur:
+            new_desc = desc if desc_given else cur["description"]
+            # 平台导入时，若旧记录缺来源信息，用本次导入的来源补全
+            new_platform = platform or cur["platform"]
+            new_label = (str(body.get("source_label", "")) or cur["source_label"])
             conn.execute(
                 "UPDATE models SET description=?,source=?,source_label=?,platform=?,updated_at=? WHERE id=?",
-                (str(body.get("description", "")), str(body.get("source", "manual")),
-                 str(body.get("source_label", "")), platform, int(time.time()), cur["id"]))
+                (new_desc, str(body.get("source", "manual")),
+                 new_label, new_platform, int(time.time()), cur["id"]))
             mid = cur["id"]
         else:
             cur = conn.execute(
                 "INSERT INTO models(name,description,source,source_label,platform,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
-                (name, str(body.get("description", "")), str(body.get("source", "manual")),
+                (name, desc if desc_given else "", str(body.get("source", "manual")),
                  str(body.get("source_label", "")), platform, int(time.time()), int(time.time())))
             mid = cur.lastrowid
         conn.commit()
@@ -633,6 +640,61 @@ async def add_model(request: Request, _: str = Depends(require_session)):
     finally:
         conn.close()
     return {"ok": True, "model": dict(row)}
+
+
+@app.post("/api/models/backfill-platform")
+async def backfill_platform(_: str = Depends(require_session)):
+    """为旧数据回填来源平台：拉取每个账号的 /v1/models，按模型名匹配写回 platform/source_label。"""
+    conn = db()
+    try:
+        accounts = conn.execute("SELECT * FROM accounts").fetchall()
+    finally:
+        conn.close()
+    plat_map: dict = {}   # 模型名 -> (platform, source_label)
+    fails: list = []
+    async with httpx.AsyncClient(timeout=12.0) as client:
+        for a in accounts:
+            cfg = PLATFORMS.get(a["platform"])
+            try:
+                plain = decrypt_key(a["key_encrypted"])
+            except InvalidToken:
+                fails.append(f"{a['label'] or a['platform']}: 解密失败")
+                continue
+            base = (a["base_url"] or (cfg["base_url"] if cfg else "")).rstrip("/")
+            if base.endswith("/v1"):
+                base = base[:-3]
+            if not base:
+                continue
+            try:
+                resp = await client.get(base + "/v1/models",
+                                        headers={"Authorization": "Bearer " + plain})
+                if resp.status_code >= 400:
+                    fails.append(f"{a['label'] or a['platform']}: HTTP {resp.status_code}")
+                    continue
+                names = [m.get("id") for m in resp.json().get("data", []) if m.get("id")]
+            except Exception as e:
+                fails.append(f"{a['label'] or a['platform']}: {type(e).__name__}")
+                continue
+            label = (cfg["display"] if cfg else a["platform"]) + (f" · {a['label']}" if a["label"] else "")
+            for n in names:
+                plat_map.setdefault(n, (a["platform"], label))
+    updated = 0
+    conn = db()
+    try:
+        rows = conn.execute("SELECT id,name FROM models WHERE platform='' OR platform IS NULL").fetchall()
+        for r in rows:
+            hit = plat_map.get(r["name"])
+            if hit:
+                conn.execute(
+                    "UPDATE models SET platform=?,source_label=?,source='import',updated_at=? WHERE id=?",
+                    (hit[0], hit[1], int(time.time()), r["id"]))
+                updated += 1
+        conn.commit()
+        total = conn.execute("SELECT COUNT(*) AS c FROM models").fetchone()["c"]
+        missing = conn.execute("SELECT COUNT(*) AS c FROM models WHERE platform='' OR platform IS NULL").fetchone()["c"]
+    finally:
+        conn.close()
+    return {"ok": True, "updated": updated, "total": total, "still_missing": missing, "failed": fails}
 
 
 @app.put("/api/models/{model_id}")
@@ -761,3 +823,8 @@ async def index():
 @app.get("/healthz")
 async def healthz():
     return {"ok": True, "version": app.version}
+
+
+@app.get("/api/version")
+async def api_version(_: str = Depends(require_session)):
+    return {"version": app.version}
