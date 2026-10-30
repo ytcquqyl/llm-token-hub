@@ -239,7 +239,12 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="LLM Token Hub", version="1.4.1", lifespan=lifespan)
+app = FastAPI(title="LLM Token Hub", version="1.4.2", lifespan=lifespan)
+
+# 反向代理支持：根据 X-Forwarded-Proto/For 修正 scheme 与客户端 IP
+# （使 Secure Cookie 在 HTTPS 反代下生效、登录限速按真实客户端 IP 统计）
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 
 
 # ---------------- 安全响应头 ----------------
