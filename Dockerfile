@@ -12,6 +12,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY static ./static
 
+# 非 root 运行：数据目录由挂载卷提供，宿主侧需保证属主 uid=1000
+RUN useradd -m -u 1000 appuser && chown -R appuser /app
+USER appuser
+
 # 数据与配置文件挂载到卷，容器重建不丢数据
 VOLUME ["/app/data"]
 EXPOSE 8787

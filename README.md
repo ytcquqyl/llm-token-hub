@@ -197,3 +197,11 @@ bash deploy/publish-github.sh
 ## 十、许可
 
 MIT License
+
+### v1.4.1 安全加固
+
+- 登录密码改为 **PBKDF2-SHA256 带盐慢哈希**（30 万次迭代），旧无盐哈希在下次登录成功时自动升级
+- 登录接口**限速**：连续失败 3 次后指数退避（最长封禁 256 秒），防在线爆破
+- 登出改为**服务端销毁会话**（此前仅删 Cookie，会话仍有效至过期）
+- 新增安全响应头（CSP / X-Frame-Options / nosniff / Referrer-Policy）
+- HTTPS 访问时 Cookie 自动带 `Secure` 标记；容器改为非 root 用户运行（uid 1000，需求数据目录属主）

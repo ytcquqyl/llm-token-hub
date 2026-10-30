@@ -13,6 +13,7 @@ LLM Token Hub —— 多平台大模型 API Token 管理中枢（网页版 / 容
 """
 import base64
 import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -156,7 +157,32 @@ def set_setting(key: str, value: str):
 
 
 def hash_pw(pw: str) -> str:
-    return hashlib.sha256(pw.encode()).hexdigest()
+    """v2：PBKDF2-HMAC-SHA256 带盐慢哈希（抵御离线爆破）；旧库遗留的无盐 SHA-256 由 verify_pw 兼容并在登录成功时自动升级。"""
+    salt = secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac("sha256", pw.encode(), salt, PBKDF2_ITER)
+    return f"v2${PBKDF2_ITER}${salt.hex()}${dk.hex()}"
+
+
+PBKDF2_ITER = 300_000
+
+
+def verify_pw(pw: str, stored: str) -> bool:
+    """恒定时间比较，兼容 v1（无盐 sha256）与 v2（PBKDF2）两种存储格式。"""
+    if stored.startswith("v2$"):
+        try:
+            _, iters, salt_hex, dk_hex = stored.split("$")
+            dk = hashlib.pbkdf2_hmac("sha256", pw.encode(), bytes.fromhex(salt_hex), int(iters))
+            return hmac.compare_digest(dk.hex(), dk_hex)
+        except Exception:
+            return False
+    return hmac.compare_digest(hashlib.sha256(pw.encode()).hexdigest(), stored)
+
+
+def maybe_upgrade_pw(pw: str):
+    """旧格式密码在下次登录成功时静默升级为 PBKDF2。"""
+    stored = get_setting("admin_pw_hash")
+    if stored and not stored.startswith("v2$") and verify_pw(pw, stored):
+        set_setting("admin_pw_hash", hash_pw(pw))
 
 
 # ---------------- AI 说明配置（key 同样用主密钥加密） ----------------
@@ -213,11 +239,29 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="LLM Token Hub", version="1.4.0", lifespan=lifespan)
+app = FastAPI(title="LLM Token Hub", version="1.4.1", lifespan=lifespan)
+
+
+# ---------------- 安全响应头 ----------------
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    resp = await call_next(request)
+    h = resp.headers
+    h.setdefault("X-Content-Type-Options", "nosniff")
+    h.setdefault("X-Frame-Options", "DENY")
+    h.setdefault("Referrer-Policy", "no-referrer")
+    h.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    # 单文件内联脚本/样式，无法避免 unsafe-inline；仍限制外链资源与被嵌入
+    h.setdefault("Content-Security-Policy",
+                 "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+                 "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+                 "connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+    return resp
 
 
 # ---------------- 会话 ----------------
 SESSIONS: dict = {}
+LOGIN_FAILS: dict = {}  # ip -> {count, last}，登录限速状态（进程内存，重启即清）
 
 
 def make_session() -> str:
@@ -289,17 +333,39 @@ def row_to_dict(r: sqlite3.Row) -> dict:
 # ---------------- 接口 ----------------
 @app.post("/api/login")
 async def login(request: Request):
-    body = await request.json()
-    if hash_pw(str(body.get("password", ""))) != get_setting("admin_pw_hash"):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "msg": "请求格式错误"}, status_code=400)
+    pw = str(body.get("password", ""))
+    ip = request.client.host if request.client else "unknown"
+    # 登录限速：连续失败 ≥3 次后指数退避（3→8s，8 次封顶 256s），防在线爆破
+    now = time.time()
+    st = LOGIN_FAILS.get(ip)
+    if st and st["count"] >= 3:
+        wait = min(256, 2 ** min(st["count"], 8))
+        remain = wait - (now - st["last"])
+        if remain > 0:
+            return JSONResponse({"ok": False,
+                                 "msg": f"尝试过于频繁，请 {int(remain) + 1} 秒后再试"}, status_code=429)
+    stored = get_setting("admin_pw_hash") or ""
+    if not pw or not verify_pw(pw, stored):
+        cur = LOGIN_FAILS.setdefault(ip, {"count": 0, "last": 0.0})
+        cur["count"] += 1
+        cur["last"] = time.time()
         return JSONResponse({"ok": False, "msg": "密码错误"}, status_code=401)
+    LOGIN_FAILS.pop(ip, None)
+    maybe_upgrade_pw(pw)  # 旧格式密码自动升级为 PBKDF2
     token = make_session()
     resp = JSONResponse({"ok": True})
-    resp.set_cookie("hub_session", token, httponly=True, samesite="lax", max_age=SESSION_TTL)
+    resp.set_cookie("hub_session", token, httponly=True, samesite="lax",
+                    max_age=SESSION_TTL, secure=request.url.scheme == "https")
     return resp
 
 
 @app.post("/api/logout")
-async def logout(_: str = Depends(require_session)):
+async def logout(token: str = Depends(require_session)):
+    SESSIONS.pop(token, None)  # 服务端销毁会话，而非仅删 Cookie
     resp = JSONResponse({"ok": True})
     resp.delete_cookie("hub_session")
     return resp
@@ -462,7 +528,8 @@ async def change_password(request: Request, _: str = Depends(require_session)):
     new = str(body.get("new", ""))
     if len(new) < 6:
         return JSONResponse({"ok": False, "msg": "新密码至少 6 位"}, status_code=400)
-    if hash_pw(cur) != get_setting("admin_pw_hash"):
+    stored = get_setting("admin_pw_hash") or ""
+    if not verify_pw(cur, stored):
         return JSONResponse({"ok": False, "msg": "当前密码错误"}, status_code=403)
     set_setting("admin_pw_hash", hash_pw(new))
     # 密码变更后强制所有会话失效，需重新登录
@@ -477,7 +544,7 @@ async def change_secret(request: Request, _: str = Depends(require_session)):
     new_secret = str(body.get("new_secret", ""))
     if len(new_secret) < 8:
         return JSONResponse({"ok": False, "msg": "新加密密钥至少 8 位"}, status_code=400)
-    if hash_pw(login_pw) != get_setting("admin_pw_hash"):
+    if not verify_pw(login_pw, get_setting("admin_pw_hash") or ""):
         return JSONResponse({"ok": False, "msg": "登录密码错误，无法修改加密密钥"}, status_code=403)
     try:
         reencrypt_all(new_secret)
